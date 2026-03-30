@@ -46,6 +46,15 @@ async function initDB() {
       sync_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS port_alerts (
+      port_key TEXT PRIMARY KEY,
+      last_percentage INTEGER,
+      status TEXT,
+      last_notified DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
   console.log("SQLite Database initialized.");
 }
 
@@ -289,19 +298,9 @@ async function startServer() {
   // Calculates fallen ports and pushes to n8n every 60 seconds
   setInterval(async () => {
     try {
-      console.log("[CRON] Checking for fallen ports to report to n8n...");
-
-      // Get data directly from our internal logic (similar to /api/local/onus)
-      const dbOnus = await db.all("SELECT * FROM onus");
-
-      // We need statuses to calculate LOS. 
-      // Instead of making a full API call here (which might be slow), 
-      // we'll rely on the data already in the DB or the most recent statuses 
-      // if we want to be very precise. 
-      // However, /api/local/onus is where the merging happens.
-      // Let's call our own endpoint or re-implement the logic.
-
-      const statusRes = await axios.get(`http://localhost:3000/api/local/onus`);
+      console.log("[CRON] Checking for port status changes...");
+      
+      const statusRes = await axios.get(`http://127.0.0.1:3000/api/local/onus`);
       const onus = statusRes.data;
 
       const portMap = new Map();
@@ -315,22 +314,61 @@ async function startServer() {
         if (o.status?.toLowerCase() === 'los') p.los++;
       });
 
-      const fallen = Array.from(portMap.values())
+      const currentFallen = Array.from(portMap.values())
         .filter(p => p.total > 0 && (p.los / p.total) >= 0.35)
         .map(p => ({
-          ...p,
+          key: `${p.olt_id}-${p.board}-${p.port}`,
+          olt_id: p.olt_id,
+          board: p.board,
+          port: p.port,
+          total: p.total,
+          los: p.los,
           percentage: Math.round((p.los / p.total) * 100)
         }));
 
-      if (fallen.length > 0) {
-        console.log(`[CRON] Found ${fallen.length} fallen ports. Sending to n8n...`);
-        await axios.post(N8N_WEBHOOK_URL, fallen);
-        console.log("[CRON] Report sent successfully.");
-      } else {
-        console.log("[CRON] No fallen ports detected.");
+      // Get previous state from DB
+      const previousAlerts = await db.all("SELECT * FROM port_alerts WHERE status = 'FALLEN'");
+      const previousMap = new Map(previousAlerts.map(a => [a.port_key, a]));
+
+      const newAlerts = currentFallen.filter(p => !previousMap.has(p.key));
+      const recoveredKeys = previousAlerts
+        .filter(a => !currentFallen.some(p => p.key === a.port_key))
+        .map(a => a.port_key);
+
+      // 1. Send NEW ALERTS
+      if (newAlerts.length > 0) {
+        console.log(`[CRON] Detected ${newAlerts.length} NEW fallen ports. Sending ALERT to n8n...`);
+        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: newAlerts });
+        
+        for (const p of newAlerts) {
+          await db.run(
+            "INSERT INTO port_alerts (port_key, last_percentage, status, last_notified) VALUES (?, ?, 'FALLEN', CURRENT_TIMESTAMP) ON CONFLICT(port_key) DO UPDATE SET status='FALLEN', last_percentage=excluded.last_percentage, last_notified=CURRENT_TIMESTAMP",
+            [p.key, p.percentage]
+          );
+        }
       }
+
+      // 2. Send RECOVERIES
+      if (recoveredKeys.length > 0) {
+        console.log(`[CRON] Detected ${recoveredKeys.length} RECOVERED ports. Sending RECOVERY to n8n...`);
+        const recoveredData = previousAlerts.filter(a => recoveredKeys.includes(a.port_key)).map(a => {
+          const [olt_id, board, port] = a.port_key.split('-');
+          return { olt_id, board, port, key: a.port_key };
+        });
+
+        await axios.post(N8N_WEBHOOK_URL, { type: 'RECOVERY', ports: recoveredData });
+
+        for (const key of recoveredKeys) {
+          await db.run("UPDATE port_alerts SET status = 'RECOVERED', last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [key]);
+        }
+      }
+
+      if (newAlerts.length === 0 && recoveredKeys.length === 0) {
+        console.log("[CRON] No changes in port status. Skipping notification to avoid spam.");
+      }
+
     } catch (err: any) {
-      console.error("[CRON] Failed to send report to n8n:", err.message);
+      console.error("[CRON] Status check failed:", err.message);
     }
   }, 60000);
 }
