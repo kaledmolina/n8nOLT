@@ -363,8 +363,12 @@ async function startServer() {
         }
       }
 
-      if (newAlerts.length === 0 && recoveredKeys.length === 0) {
-        console.log("[CRON] No changes in port status. Skipping notification to avoid spam.");
+      // 3. Periodic Status Report (AS REQUESTED: Every 60 seconds send "Puertos Caídos")
+      if (currentFallen.length > 0) {
+        console.log(`[CRON] Sending minutely status report for ${currentFallen.length} fallen ports...`);
+        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: currentFallen });
+      } else {
+        console.log("[CRON] No fallen ports to report in status cycle.");
       }
 
     } catch (err: any) {
