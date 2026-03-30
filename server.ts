@@ -48,13 +48,15 @@ async function initDB() {
   `);
 
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS port_alerts (
-      port_key TEXT PRIMARY KEY,
-      last_percentage INTEGER,
-      status TEXT,
-      last_notified DATETIME DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
     )
   `);
+
+  // Set default threshold if not exists
+  await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('FALLEN_PORT_THRESHOLD', '7')");
+
   console.log("SQLite Database initialized.");
 }
 
@@ -246,9 +248,41 @@ async function startServer() {
     }
   });
 
-  // Local API - Get Report of Fallen Ports (>=35% LOS)
+  // Local API - Settings Management
+  app.get("/api/local/settings", async (req, res) => {
+    try {
+      const rows = await db.all("SELECT * FROM settings");
+      const settings = rows.reduce((acc: any, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      res.json(settings);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/local/settings", async (req, res) => {
+    try {
+      const updates = req.body;
+      for (const [key, value] of Object.entries(updates)) {
+        await db.run(
+          "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          [key, String(value)]
+        );
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Local API - Get Report of Fallen Ports
   app.get("/api/local/fallen-ports", async (req, res) => {
     try {
+      const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
+      const threshold = parseInt(thresholdRow?.value || '7');
+
       // Re-use logic from /api/local/onus internally or just fetch it
       const onusRes = await axios.get(`http://localhost:3000/api/local/onus`);
       const onus = onusRes.data;
@@ -265,7 +299,7 @@ async function startServer() {
       });
 
       const fallen = Array.from(portMap.values())
-        .filter(p => p.total > 0 && (p.los / p.total) >= 0.35)
+        .filter(p => p.total > threshold && (p.los / p.total) >= 0.35)
         .map(p => ({
           ...p,
           percentage: Math.round((p.los / p.total) * 100)
@@ -300,6 +334,9 @@ async function startServer() {
     try {
       console.log("[CRON] Checking for port status changes...");
       
+      const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
+      const threshold = parseInt(thresholdRow?.value || '7');
+
       const statusRes = await axios.get(`http://127.0.0.1:3000/api/local/onus`);
       const onus = statusRes.data;
 
@@ -315,7 +352,7 @@ async function startServer() {
       });
 
       const currentFallen = Array.from(portMap.values())
-        .filter(p => p.total > 7 && (p.los / p.total) >= 0.35)
+        .filter(p => p.total > threshold && (p.los / p.total) >= 0.35)
         .map(p => ({
           key: `${p.olt_id}-${p.board}-${p.port}`,
           olt_id: p.olt_id,

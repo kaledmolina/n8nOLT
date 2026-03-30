@@ -61,6 +61,27 @@ export default function App() {
   const [selectedBoardFilter, setSelectedBoardFilter] = useState('all');
   const [selectedPortFilter, setSelectedPortFilter] = useState('all');
   const [refreshing, setRefreshing] = useState(false);
+  const [onusThreshold, setOnusThreshold] = useState<number>(7);
+
+  const fetchSettings = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/local/settings');
+      if (res.data?.FALLEN_PORT_THRESHOLD) {
+        setOnusThreshold(parseInt(res.data.FALLEN_PORT_THRESHOLD));
+      }
+    } catch (err) {
+      console.error("Failed to fetch settings:", err);
+    }
+  }, []);
+
+  const updateThreshold = async (val: number) => {
+    setOnusThreshold(val);
+    try {
+      await axios.post('/api/local/settings', { FALLEN_PORT_THRESHOLD: val });
+    } catch (err) {
+      console.error("Failed to update threshold:", err);
+    }
+  };
 
   const getOltName = useCallback((id: string | number) => {
     const olt = olts.find(o => String(o.id || o.olt_id) === String(id));
@@ -199,6 +220,7 @@ export default function App() {
   useEffect(() => {
     if (subdomain && apiKey) {
       checkConnection();
+      fetchSettings();
       fetchONUs();
       
       // Auto-refresh the live statuses every 60 seconds (1 minuto)
@@ -275,6 +297,21 @@ export default function App() {
                 </span>
               </div>
             )}
+
+            <div className="flex flex-col items-start mr-2 bg-slate-100/50 p-2 rounded-sm border border-[#141414]/5">
+              <span className="text-[9px] uppercase tracking-widest font-bold opacity-40 mb-1">Umbral ONUs</span>
+              <div className="flex items-center gap-2">
+                <input 
+                  type="number" 
+                  min="0" 
+                  max="128"
+                  value={onusThreshold} 
+                  onChange={(e) => updateThreshold(parseInt(e.target.value) || 0)}
+                  className="w-12 bg-transparent border-b border-[#141414]/20 text-xs font-mono focus:outline-none focus:border-[#141414] transition-colors"
+                />
+                <Settings className="w-3 h-3 opacity-30" />
+              </div>
+            </div>
 
             <button 
               onClick={forceSyncDB}
@@ -470,7 +507,7 @@ export default function App() {
 
         {/* Stats Summary */}
         {(() => {
-          const totallyFallen = ponOutages.filter(p => p.total_onus > 7 && (p.los / p.total_onus) >= 0.35);
+          const totallyFallen = ponOutages.filter(p => p.total_onus > onusThreshold && (p.los / p.total_onus) >= 0.35);
           const totalPorts = ponOutages.length;
 
           return (
