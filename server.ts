@@ -315,7 +315,7 @@ async function startServer() {
       });
 
       const currentFallen = Array.from(portMap.values())
-        .filter(p => p.total > 0 && (p.los / p.total) >= 0.35)
+        .filter(p => p.total > 7 && (p.los / p.total) >= 0.35)
         .map(p => ({
           key: `${p.olt_id}-${p.board}-${p.port}`,
           olt_id: p.olt_id,

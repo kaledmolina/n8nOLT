@@ -470,7 +470,7 @@ export default function App() {
 
         {/* Stats Summary */}
         {(() => {
-          const totallyFallen = ponOutages.filter(p => p.total_onus > 0 && (p.los / p.total_onus) >= 0.35);
+          const totallyFallen = ponOutages.filter(p => p.total_onus > 7 && (p.los / p.total_onus) >= 0.35);
           const totalPorts = ponOutages.length;
 
           return (
