@@ -1,0 +1,5 @@
+{
+  "name": "SmartOLT ONU Monitor",
+  "description": "A technical dashboard to monitor ONU status and signals via SmartOLT API.",
+  "requestFramePermissions": []
+}

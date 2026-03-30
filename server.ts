@@ -1,0 +1,338 @@
+import express from "express";
+import axios from "axios";
+import path from "path";
+import { fileURLToPath } from "url";
+import { createServer as createViteServer } from "vite";
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const API_KEY = "3332756bd57545ba99a55b54fa666c18";
+const TARGET_HOST = "intalnet.vortex-m2.com";
+const N8N_WEBHOOK_URL = "https://n8n.intalnet.com/webhook-test/smartolt-report";
+
+let db: any;
+
+async function initDB() {
+  db = await open({
+    filename: path.join(__dirname, 'smartolt_cache.db'),
+    driver: sqlite3.Database
+  });
+  
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS onus (
+      sn TEXT PRIMARY KEY,
+      name TEXT,
+      unique_external_id TEXT,
+      olt_id TEXT,
+      board TEXT,
+      port TEXT,
+      onu TEXT,
+      zone_id TEXT,
+      hardware_type TEXT,
+      status TEXT,
+      raw_data TEXT,
+      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_type TEXT,
+      inserted_count INTEGER,
+      sync_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log("SQLite Database initialized.");
+}
+
+const axiosConfig = {
+  headers: {
+    "X-Token": API_KEY,
+    "X-API-Key": API_KEY,
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0"
+  },
+  timeout: 15000
+};
+
+async function startServer() {
+  await initDB();
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json());
+
+  // Proxy endpoint for SmartOLT API
+  app.get("/api/smartolt/:host/*", async (req, res) => {
+    const { host } = req.params;
+    const apiPath = req.params[0];
+    const queryParams = new URLSearchParams(req.query as any).toString();
+    const targetHost = host.includes(".") ? host : `${host}.smartolt.com`;
+    const url = `https://${targetHost}/api/${apiPath}${queryParams ? "?" + queryParams : ""}`;
+
+    try {
+      const response = await axios.get(url, axiosConfig);
+      res.json(response.data);
+    } catch (error: any) {
+      const status = error.response?.status || 500;
+      res.status(status).json({
+        error: error.message,
+        details: error.response?.data
+      });
+    }
+  });
+
+  // Local API - Trigger Sync
+  app.post("/api/local/sync", async (req, res) => {
+    try {
+      console.log("Starting DB Sync...");
+      let rawOnus: any[] = [];
+      let usedFallback = false;
+
+      try {
+        const detailsRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_all_onus_details`, axiosConfig);
+        rawOnus = Array.isArray(detailsRes.data) ? detailsRes.data : (detailsRes.data.onus || detailsRes.data.data || []);
+      } catch (err: any) {
+        if (err.response?.status === 403) {
+          console.warn("403 Rate Limit on details. Falling back to signals for sync.");
+          usedFallback = true;
+          const signalsRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_signals`, axiosConfig);
+          const sigs = Array.isArray(signalsRes.data) ? signalsRes.data : (signalsRes.data.response || signalsRes.data.data || []);
+          rawOnus = sigs.map((s: any) => ({
+            sn: s.sn,
+            name: `ONU ${s.sn}`,
+            olt_id: s.olt_id,
+            board: s.board,
+            port: s.port,
+            onu: s.onu,
+            zone_id: s.zone_id,
+            status: s.status || 'Unknown'
+          }));
+        } else {
+          throw err;
+        }
+      }
+
+      // Upsert into SQLite
+      let inserted = 0;
+      for (const onu of rawOnus) {
+        const sn = (onu.sn || onu.onu_sn || onu.serial_number || onu.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+        if (!sn) continue;
+        
+        await db.run(
+          `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, raw_data, last_updated)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(sn) DO UPDATE SET 
+            name=excluded.name, 
+            unique_external_id=excluded.unique_external_id,
+            olt_id=excluded.olt_id, 
+            board=excluded.board, 
+            port=excluded.port, 
+            onu=excluded.onu,
+            zone_id=excluded.zone_id,
+            hardware_type=excluded.hardware_type,
+            status=excluded.status,
+            raw_data=excluded.raw_data,
+            last_updated=CURRENT_TIMESTAMP`,
+          [
+            sn, onu.name || `ONU ${sn}`, onu.unique_external_id, onu.olt_id, onu.board, onu.port, onu.onu, onu.zone_id, onu.onu_type_name || onu.hardware_type, onu.status, JSON.stringify(onu)
+          ]
+        );
+        inserted++;
+      }
+
+      await db.run(
+        `INSERT INTO sync_logs (sync_type, inserted_count, sync_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, 
+        [usedFallback ? 'FALLBACK' : 'FULL', inserted]
+      );
+
+      res.json({ success: true, count: inserted, fallback: usedFallback });
+    } catch (error: any) {
+      console.error("Sync Error:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Local API - Last Sync Status
+  app.get("/api/local/sync-status", async (req, res) => {
+    try {
+      const row = await db.get("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1");
+      res.json(row || { sync_time: null, sync_type: null });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Local API - Get ONUs (merges DB with live status)
+  app.get("/api/local/onus", async (req, res) => {
+    try {
+      const dbOnus = await db.all("SELECT * FROM onus");
+      
+      let statusMap = new Map();
+      let adminStatusMap = new Map();
+
+      try {
+        // Fetch running statuses
+        const statusRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_statuses`, axiosConfig);
+        let statusData = statusRes.data;
+        if (Array.isArray(statusData) && statusData.length === 1 && statusData[0].onus) statusData = statusData[0];
+        
+        let rawStatuses: any[] = [];
+        if (Array.isArray(statusData)) {
+          rawStatuses = statusData;
+        } else if (statusData && Array.isArray(statusData.onus)) {
+          rawStatuses = statusData.onus;
+        } else if (statusData && Array.isArray(statusData.response)) {
+          rawStatuses = statusData.response;
+        } else if (statusData && Array.isArray(statusData.data)) {
+          rawStatuses = statusData.data;
+        } else if (statusData && typeof statusData === "object") {
+          Object.entries(statusData).forEach(([k, v]) => {
+            if (k !== "status" && typeof v === "string") {
+              const sn = k.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+              statusMap.set(sn, v);
+            }
+          });
+        }
+        
+        rawStatuses.forEach((s: any) => {
+          const sn = (s.sn || s.onu_sn || s.serial_number || s.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+          if (sn) statusMap.set(sn, s.status || s.onu_status || s.phase_state || s.state || s.run_state);
+        });
+
+        // Also fetch administrative statuses as requested by user
+        const adminRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_administrative_statuses`, axiosConfig);
+        const adminData = Array.isArray(adminRes.data) ? adminRes.data : (adminRes.data.response || []);
+        adminData.forEach((s: any) => {
+           const sn = (s.sn || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+           if (sn) adminStatusMap.set(sn, s.admin_status);
+        });
+
+      } catch (err: any) {
+        console.warn("Failed to fetch live statuses:", err.message);
+      }
+
+      const merged = dbOnus.map((o: any) => {
+        let liveStatus = statusMap.get(o.sn);
+        const adminStatus = adminStatusMap.get(o.sn);
+        
+        if (adminStatus && adminStatus.toLowerCase() === 'disabled') {
+            liveStatus = 'Disabled';
+        }
+
+        return {
+          ...o,
+          status: liveStatus || o.status || "Unknown",
+          admin_status: adminStatus || "Unknown"
+        };
+      });
+
+      res.json(merged);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Local API - Get Report of Fallen Ports (>=35% LOS)
+  app.get("/api/local/fallen-ports", async (req, res) => {
+    try {
+      // Re-use logic from /api/local/onus internally or just fetch it
+      const onusRes = await axios.get(`http://localhost:3000/api/local/onus`);
+      const onus = onusRes.data;
+
+      const portMap = new Map();
+      onus.forEach((o: any) => {
+        const key = `${o.olt_id}-${o.board}-${o.port}`;
+        if (!portMap.has(key)) {
+          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0 });
+        }
+        const p = portMap.get(key);
+        p.total++;
+        if (o.status?.toLowerCase() === 'los') p.los++;
+      });
+
+      const fallen = Array.from(portMap.values())
+        .filter(p => p.total > 0 && (p.los / p.total) >= 0.35)
+        .map(p => ({
+          ...p,
+          percentage: Math.round((p.los / p.total) * 100)
+        }));
+
+      res.json(fallen);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // --- BACKGROUND CRON FOR N8N ---
+  // Calculates fallen ports and pushes to n8n every 60 seconds
+  setInterval(async () => {
+    try {
+      console.log("[CRON] Checking for fallen ports to report to n8n...");
+      
+      // Get data directly from our internal logic (similar to /api/local/onus)
+      const dbOnus = await db.all("SELECT * FROM onus");
+      
+      // We need statuses to calculate LOS. 
+      // Instead of making a full API call here (which might be slow), 
+      // we'll rely on the data already in the DB or the most recent statuses 
+      // if we want to be very precise. 
+      // However, /api/local/onus is where the merging happens.
+      // Let's call our own endpoint or re-implement the logic.
+      
+      const statusRes = await axios.get(`http://localhost:3000/api/local/onus`);
+      const onus = statusRes.data;
+
+      const portMap = new Map();
+      onus.forEach((o: any) => {
+        const key = `${o.olt_id}-${o.board}-${o.port}`;
+        if (!portMap.has(key)) {
+          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0 });
+        }
+        const p = portMap.get(key);
+        p.total++;
+        if (o.status?.toLowerCase() === 'los') p.los++;
+      });
+
+      const fallen = Array.from(portMap.values())
+        .filter(p => p.total > 0 && (p.los / p.total) >= 0.35)
+        .map(p => ({
+          ...p,
+          percentage: Math.round((p.los / p.total) * 100)
+        }));
+
+      if (fallen.length > 0) {
+        console.log(`[CRON] Found ${fallen.length} fallen ports. Sending to n8n...`);
+        await axios.post(N8N_WEBHOOK_URL, fallen);
+        console.log("[CRON] Report sent successfully.");
+      } else {
+        console.log("[CRON] No fallen ports detected.");
+      }
+    } catch (err: any) {
+      console.error("[CRON] Failed to send report to n8n:", err.message);
+    }
+  }, 60000);
+}
+
+startServer();
