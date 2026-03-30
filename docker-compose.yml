@@ -1,0 +1,19 @@
+services:
+  smartolt-monitor:
+    build: .
+    container_name: smartolt-monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/data/smartolt_cache.db
+      # You can also pass these directly or let them use .env defaults
+      # - API_KEY=...
+      # - TARGET_HOST=...
+      # - N8N_WEBHOOK_URL=...
+    env_file:
+      - .env

@@ -6,18 +6,21 @@ import { createServer as createViteServer } from "vite";
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 
+import 'dotenv/config';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const API_KEY = "3332756bd57545ba99a55b54fa666c18";
-const TARGET_HOST = "intalnet.vortex-m2.com";
-const N8N_WEBHOOK_URL = "https://n8n.intalnet.com/webhook/smartolt-report";
+const API_KEY = process.env.API_KEY || "3332756bd57545ba99a55b54fa666c18";
+const TARGET_HOST = process.env.TARGET_HOST || "intalnet.vortex-m2.com";
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || "https://n8n.intalnet.com/webhook/smartolt-report";
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'smartolt_cache.db');
 
 let db: any;
 
 async function initDB() {
   db = await open({
-    filename: path.join(__dirname, 'smartolt_cache.db'),
+    filename: DB_PATH,
     driver: sqlite3.Database
   });
 
@@ -342,13 +345,16 @@ async function startServer() {
 
       const portMap = new Map();
       onus.forEach((o: any) => {
-        const key = `${o.olt_id}-${o.board}-${o.port}`;
-        if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0 });
+        // SYNC LOGIC: Ignore disabled ONUs for mass outage threshold, just like in App.tsx
+        if (o.admin_status?.toLowerCase() !== 'disabled') {
+          const key = `${o.olt_id}-${o.board}-${o.port}`;
+          if (!portMap.has(key)) {
+            portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0 });
+          }
+          const p = portMap.get(key);
+          p.total++;
+          if (o.status?.toLowerCase() === 'los') p.los++;
         }
-        const p = portMap.get(key);
-        p.total++;
-        if (o.status?.toLowerCase() === 'los') p.los++;
       });
 
       const currentFallen = Array.from(portMap.values())
