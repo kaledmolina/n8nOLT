@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 
 const API_KEY = "3332756bd57545ba99a55b54fa666c18";
 const TARGET_HOST = "intalnet.vortex-m2.com";
-const N8N_WEBHOOK_URL = "https://n8n.intalnet.com/webhook-test/smartolt-report";
+const N8N_WEBHOOK_URL = "https://n8n.intalnet.com/webhook/smartolt-report";
 
 let db: any;
 
@@ -20,7 +20,7 @@ async function initDB() {
     filename: path.join(__dirname, 'smartolt_cache.db'),
     driver: sqlite3.Database
   });
-  
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS onus (
       sn TEXT PRIMARY KEY,
@@ -37,7 +37,7 @@ async function initDB() {
       last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS sync_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +122,7 @@ async function startServer() {
       for (const onu of rawOnus) {
         const sn = (onu.sn || onu.onu_sn || onu.serial_number || onu.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
         if (!sn) continue;
-        
+
         await db.run(
           `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, raw_data, last_updated)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -146,7 +146,7 @@ async function startServer() {
       }
 
       await db.run(
-        `INSERT INTO sync_logs (sync_type, inserted_count, sync_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, 
+        `INSERT INTO sync_logs (sync_type, inserted_count, sync_time) VALUES (?, ?, CURRENT_TIMESTAMP)`,
         [usedFallback ? 'FALLBACK' : 'FULL', inserted]
       );
 
@@ -171,7 +171,7 @@ async function startServer() {
   app.get("/api/local/onus", async (req, res) => {
     try {
       const dbOnus = await db.all("SELECT * FROM onus");
-      
+
       let statusMap = new Map();
       let adminStatusMap = new Map();
 
@@ -180,7 +180,7 @@ async function startServer() {
         const statusRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_statuses`, axiosConfig);
         let statusData = statusRes.data;
         if (Array.isArray(statusData) && statusData.length === 1 && statusData[0].onus) statusData = statusData[0];
-        
+
         let rawStatuses: any[] = [];
         if (Array.isArray(statusData)) {
           rawStatuses = statusData;
@@ -198,7 +198,7 @@ async function startServer() {
             }
           });
         }
-        
+
         rawStatuses.forEach((s: any) => {
           const sn = (s.sn || s.onu_sn || s.serial_number || s.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
           if (sn) statusMap.set(sn, s.status || s.onu_status || s.phase_state || s.state || s.run_state);
@@ -208,8 +208,8 @@ async function startServer() {
         const adminRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_administrative_statuses`, axiosConfig);
         const adminData = Array.isArray(adminRes.data) ? adminRes.data : (adminRes.data.response || []);
         adminData.forEach((s: any) => {
-           const sn = (s.sn || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-           if (sn) adminStatusMap.set(sn, s.admin_status);
+          const sn = (s.sn || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+          if (sn) adminStatusMap.set(sn, s.admin_status);
         });
 
       } catch (err: any) {
@@ -219,9 +219,9 @@ async function startServer() {
       const merged = dbOnus.map((o: any) => {
         let liveStatus = statusMap.get(o.sn);
         const adminStatus = adminStatusMap.get(o.sn);
-        
+
         if (adminStatus && adminStatus.toLowerCase() === 'disabled') {
-            liveStatus = 'Disabled';
+          liveStatus = 'Disabled';
         }
 
         return {
@@ -290,17 +290,17 @@ async function startServer() {
   setInterval(async () => {
     try {
       console.log("[CRON] Checking for fallen ports to report to n8n...");
-      
+
       // Get data directly from our internal logic (similar to /api/local/onus)
       const dbOnus = await db.all("SELECT * FROM onus");
-      
+
       // We need statuses to calculate LOS. 
       // Instead of making a full API call here (which might be slow), 
       // we'll rely on the data already in the DB or the most recent statuses 
       // if we want to be very precise. 
       // However, /api/local/onus is where the merging happens.
       // Let's call our own endpoint or re-implement the logic.
-      
+
       const statusRes = await axios.get(`http://localhost:3000/api/local/onus`);
       const onus = statusRes.data;
 
