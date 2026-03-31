@@ -66,6 +66,53 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [onusThreshold, setOnusThreshold] = useState<number>(7);
   const [syncFallback, setSyncFallback] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [sessionUser, setSessionUser] = useState<any>(null);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  const checkAuth = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/auth-check');
+      if (res.data.authenticated) {
+        setIsAuthenticated(true);
+        setSessionUser(res.data.user);
+      } else {
+        setIsAuthenticated(false);
+      }
+    } catch (err) {
+      setIsAuthenticated(false);
+    }
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoggingIn(true);
+    setLoginError(null);
+    try {
+      const res = await axios.post('/api/login', { email: loginEmail, password: loginPassword });
+      if (res.data.success) {
+        setIsAuthenticated(true);
+        setSessionUser(res.data.user);
+      }
+    } catch (err: any) {
+      setLoginError(err.response?.data?.error || "Invalid credentials");
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await axios.post('/api/logout');
+      setIsAuthenticated(false);
+      setSessionUser(null);
+    } catch (err) {
+      console.error("Logout failed:", err);
+    }
+  };
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -223,18 +270,19 @@ export default function App() {
   }, [subdomain, apiKey]);
 
   useEffect(() => {
-    if (subdomain && apiKey) {
+    checkAuth();
+  }, [checkAuth]);
+
+  useEffect(() => {
+    if (isAuthenticated && subdomain && apiKey) {
       checkConnection();
       fetchSettings();
       fetchONUs();
       
-      // Auto-refresh the live statuses every 60 seconds (1 minuto)
-      // This ensures the PON Outages and Online counts are always up-to-date
-      // without consuming the heavy 'get_all_onus_details' API rate limit.
       const interval = setInterval(() => fetchONUs(true), 60000); 
       return () => clearInterval(interval);
     }
-  }, [checkConnection, fetchONUs, subdomain, apiKey]);
+  }, [checkConnection, fetchONUs, subdomain, apiKey, isAuthenticated, fetchSettings]);
 
   const filteredOnus = onus.filter(o => 
     (o.name || "").toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -275,6 +323,91 @@ export default function App() {
     if (diffHours < 24) return `${diffHours}h ago`;
     return `${diffDays}d ago`;
   };
+
+  if (isAuthenticated === null) {
+    return (
+      <div className="min-h-screen bg-[#E4E3E0] flex items-center justify-center">
+        <Activity className="w-8 h-8 animate-pulse opacity-20" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-[#141414] flex items-center justify-center p-4 selection:bg-[#E4E3E0] selection:text-[#141414]">
+        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-20">
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-emerald-500 rounded-full blur-[120px]" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-600 rounded-full blur-[120px]" />
+        </div>
+
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-[#1c1c1c] border border-white/5 p-8 relative z-10 shadow-2xl rounded-sm"
+        >
+          <div className="flex items-center gap-3 mb-8">
+            <div className="w-10 h-10 bg-[#E4E3E0] flex items-center justify-center rounded-sm">
+              <Activity className="text-[#141414] w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-[#E4E3E0] font-serif italic text-2xl tracking-tight">SmartOLT Monitor</h1>
+              <p className="text-[10px] uppercase font-bold tracking-[0.2em] text-[#E4E3E0]/40">Internal Dashboard v1.0</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase font-bold tracking-widest text-[#E4E3E0]/40">Email Address</label>
+              <input 
+                type="email" 
+                required
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 px-4 py-3 text-[#E4E3E0] font-mono text-sm focus:outline-none focus:border-emerald-500/50 transition-colors rounded-sm"
+                placeholder="email@example.com"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase font-bold tracking-widest text-[#E4E3E0]/40">Password</label>
+              <input 
+                type="password" 
+                required
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 px-4 py-3 text-[#E4E3E0] font-mono text-sm focus:outline-none focus:border-emerald-500/50 transition-colors rounded-sm"
+                placeholder="••••••••"
+              />
+            </div>
+
+            {loginError && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-rose-500 text-xs font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/20 p-3 rounded-sm flex items-center gap-2"
+              >
+                <AlertTriangle className="w-3 h-3" />
+                {loginError}
+              </motion.div>
+            )}
+
+            <button 
+              type="submit"
+              disabled={loggingIn}
+              className="w-full bg-[#E4E3E0] text-[#141414] py-3 text-xs font-black uppercase tracking-[0.2em] hover:bg-white transition-colors disabled:opacity-50 flex items-center justify-center gap-2 rounded-sm"
+            >
+              {loggingIn ? "Authenticating..." : "Access Dashboard"}
+              {!loggingIn && <ChevronRight className="w-4 h-4" />}
+            </button>
+          </form>
+
+          <p className="mt-8 text-center text-[9px] uppercase font-bold tracking-widest text-white/20">
+            Secure Session Management Active
+          </p>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0]">
@@ -354,6 +487,14 @@ export default function App() {
             >
               <RefreshCw className={cn("w-3 h-3", loading && "animate-spin")} />
               {loading ? "Loading..." : "Refresh"}
+            </button>
+
+            <button 
+              onClick={handleLogout}
+              className="p-2 text-rose-500 hover:bg-rose-500/10 rounded-sm transition-colors border border-transparent hover:border-rose-500/20"
+              title="Cerrar Sesión"
+            >
+              <Power className="w-4 h-4" />
             </button>
           </div>
         </div>

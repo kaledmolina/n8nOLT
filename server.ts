@@ -6,6 +6,8 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
+import session from 'express-session';
+import cookieParser from 'cookie-parser';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -220,6 +222,52 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+  app.use(cookieParser());
+  app.use(session({
+    secret: process.env.SESSION_SECRET || 'smartolt-monitor-secret-key-2026',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { 
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+  }));
+
+  // Auth Middleware
+  const requireAuth = (req: any, res: any, next: any) => {
+    if ((req.session as any).user) {
+      next();
+    } else {
+      res.status(401).json({ error: "Unauthorized" });
+    }
+  };
+
+  // Auth Endpoints
+  app.post("/api/login", (req, res) => {
+    const { email, password } = req.body;
+    if (email === "kaledmoly@gmail.com" && password === "colombia2025**") {
+      (req.session as any).user = { email };
+      res.json({ success: true, user: { email } });
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
+  });
+
+  app.get("/api/auth-check", (req, res) => {
+    if ((req.session as any).user) {
+      res.json({ authenticated: true, user: (req.session as any).user });
+    } else {
+      res.json({ authenticated: false });
+    }
+  });
+
+  app.post("/api/logout", (req, res) => {
+    req.session.destroy((err: any) => {
+      if (err) return res.status(500).json({ error: "Could not log out" });
+      res.clearCookie('connect.sid');
+      res.json({ success: true });
+    });
+  });
 
   // Logging middleware
   app.use((req, res, next) => {
@@ -251,8 +299,8 @@ async function startServer() {
     }
   });
 
-  // Local API - Trigger Sync
-  app.post("/api/local/sync", async (req, res) => {
+  // Local API - Trigger Sync (Protected)
+  app.post("/api/local/sync", requireAuth, async (req, res) => {
     try {
       console.log("Starting DB Sync...");
       let rawOnus: any[] = [];
@@ -334,8 +382,8 @@ async function startServer() {
     }
   });
 
-  // Local API - Last Sync Status
-  app.get("/api/local/sync-status", async (req, res) => {
+  // Local API - Last Sync Status (Protected)
+  app.get("/api/local/sync-status", requireAuth, async (req, res) => {
     try {
       const row = await db.get("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1");
       res.json(row || { sync_time: null, sync_type: null });
@@ -344,8 +392,8 @@ async function startServer() {
     }
   });
 
-  // Local API - Get ONUs
-  app.get("/api/local/onus", async (req, res) => {
+  // Local API - Get ONUs (Protected)
+  app.get("/api/local/onus", requireAuth, async (req, res) => {
     try {
       const merged = await getOnusWithStatus();
       res.json(merged);
@@ -354,8 +402,8 @@ async function startServer() {
     }
   });
 
-  // Local API - Settings Management
-  app.get("/api/local/settings", async (req, res) => {
+  // Local API - Settings Management (Protected)
+  app.get("/api/local/settings", requireAuth, async (req, res) => {
     try {
       const rows = await db.all("SELECT * FROM settings");
       const settings = rows.reduce((acc: any, row: any) => {
@@ -368,7 +416,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/local/settings", async (req, res) => {
+  app.post("/api/local/settings", requireAuth, async (req, res) => {
     try {
       const updates = req.body;
       for (const [key, value] of Object.entries(updates)) {
@@ -383,8 +431,8 @@ async function startServer() {
     }
   });
 
-  // Local API - Get Report of Fallen Ports
-  app.get("/api/local/fallen-ports", async (req, res) => {
+  // Local API - Get Report of Fallen Ports (Protected)
+  app.get("/api/local/fallen-ports", requireAuth, async (req, res) => {
     try {
       const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
       const threshold = parseInt(thresholdRow?.value || '7');
