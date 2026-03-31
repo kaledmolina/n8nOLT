@@ -68,7 +68,11 @@ async function initDB() {
   // Set default threshold if not exists
   await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('FALLEN_PORT_THRESHOLD', '7')");
 
-  console.log("SQLite Database initialized.");
+  // Optimization: Enable WAL mode for better concurrency and speed
+  await db.exec('PRAGMA journal_mode = WAL');
+  await db.exec('PRAGMA synchronous = NORMAL');
+
+  console.log("SQLite Database initialized (WAL mode enabled).");
 }
 
 const axiosConfig = {
@@ -78,8 +82,76 @@ const axiosConfig = {
     "Accept": "application/json",
     "User-Agent": "Mozilla/5.0"
   },
-  timeout: 15000
+  timeout: 600000 // 10 minutes timeout for SmartOLT heavy requests
 };
+
+// Reusable logic to get ONUs with status without internal HTTP calls
+async function getOnusWithStatus() {
+  const dbOnus = await db.all("SELECT * FROM onus");
+
+  let statusMap = new Map();
+  let adminStatusMap = new Map();
+
+  try {
+    // Fetch running statuses
+    console.log("[API] Fetching live statuses from SmartOLT...");
+    const statusRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_statuses`, axiosConfig);
+    let statusData = statusRes.data;
+    if (Array.isArray(statusData) && statusData.length === 1 && statusData[0].onus) statusData = statusData[0];
+
+    let rawStatuses: any[] = [];
+    if (Array.isArray(statusData)) {
+      rawStatuses = statusData;
+    } else if (statusData && Array.isArray(statusData.onus)) {
+      rawStatuses = statusData.onus;
+    } else if (statusData && Array.isArray(statusData.response)) {
+      rawStatuses = statusData.response;
+    } else if (statusData && Array.isArray(statusData.data)) {
+      rawStatuses = statusData.data;
+    } else if (statusData && typeof statusData === "object") {
+      Object.entries(statusData).forEach(([k, v]) => {
+        if (k !== "status" && typeof v === "string") {
+          const sn = k.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+          statusMap.set(sn, v);
+        }
+      });
+    }
+
+    rawStatuses.forEach((s: any) => {
+      const sn = (s.sn || s.onu_sn || s.serial_number || s.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+      if (sn) statusMap.set(sn, s.status || s.onu_status || s.phase_state || s.state || s.run_state);
+    });
+
+    // Also fetch administrative statuses
+    console.log("[API] Fetching administrative statuses from SmartOLT...");
+    const adminRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_administrative_statuses`, axiosConfig);
+    const adminData = Array.isArray(adminRes.data) ? adminRes.data : (adminRes.data.response || []);
+    adminData.forEach((s: any) => {
+      const sn = (s.sn || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+      if (sn) adminStatusMap.set(sn, s.admin_status);
+    });
+
+  } catch (err: any) {
+    console.warn("Failed to fetch live statuses from SmartOLT:", err.message);
+  }
+
+  const merged = dbOnus.map((o: any) => {
+    let liveStatus = statusMap.get(o.sn);
+    const adminStatus = adminStatusMap.get(o.sn);
+
+    if (adminStatus && adminStatus.toLowerCase() === 'disabled') {
+      liveStatus = 'Disabled';
+    }
+
+    return {
+      ...o,
+      status: liveStatus || o.status || "Unknown",
+      admin_status: adminStatus || "Unknown"
+    };
+  });
+
+  return merged;
+}
 
 async function startServer() {
   await initDB();
@@ -87,6 +159,16 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  // Logging middleware
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(`[${req.method}] ${req.url} - ${res.statusCode} (${duration}ms)`);
+    });
+    next();
+  });
 
   // Proxy endpoint for SmartOLT API
   app.get("/api/smartolt/:host/*", async (req, res) => {
@@ -199,67 +281,7 @@ async function startServer() {
   // Local API - Get ONUs (merges DB with live status)
   app.get("/api/local/onus", async (req, res) => {
     try {
-      const dbOnus = await db.all("SELECT * FROM onus");
-
-      let statusMap = new Map();
-      let adminStatusMap = new Map();
-
-      try {
-        // Fetch running statuses
-        const statusRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_statuses`, axiosConfig);
-        let statusData = statusRes.data;
-        if (Array.isArray(statusData) && statusData.length === 1 && statusData[0].onus) statusData = statusData[0];
-
-        let rawStatuses: any[] = [];
-        if (Array.isArray(statusData)) {
-          rawStatuses = statusData;
-        } else if (statusData && Array.isArray(statusData.onus)) {
-          rawStatuses = statusData.onus;
-        } else if (statusData && Array.isArray(statusData.response)) {
-          rawStatuses = statusData.response;
-        } else if (statusData && Array.isArray(statusData.data)) {
-          rawStatuses = statusData.data;
-        } else if (statusData && typeof statusData === "object") {
-          Object.entries(statusData).forEach(([k, v]) => {
-            if (k !== "status" && typeof v === "string") {
-              const sn = k.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-              statusMap.set(sn, v);
-            }
-          });
-        }
-
-        rawStatuses.forEach((s: any) => {
-          const sn = (s.sn || s.onu_sn || s.serial_number || s.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-          if (sn) statusMap.set(sn, s.status || s.onu_status || s.phase_state || s.state || s.run_state);
-        });
-
-        // Also fetch administrative statuses as requested by user
-        const adminRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_administrative_statuses`, axiosConfig);
-        const adminData = Array.isArray(adminRes.data) ? adminRes.data : (adminRes.data.response || []);
-        adminData.forEach((s: any) => {
-          const sn = (s.sn || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-          if (sn) adminStatusMap.set(sn, s.admin_status);
-        });
-
-      } catch (err: any) {
-        console.warn("Failed to fetch live statuses:", err.message);
-      }
-
-      const merged = dbOnus.map((o: any) => {
-        let liveStatus = statusMap.get(o.sn);
-        const adminStatus = adminStatusMap.get(o.sn);
-
-        if (adminStatus && adminStatus.toLowerCase() === 'disabled') {
-          liveStatus = 'Disabled';
-        }
-
-        return {
-          ...o,
-          status: liveStatus || o.status || "Unknown",
-          admin_status: adminStatus || "Unknown"
-        };
-      });
-
+      const merged = await getOnusWithStatus();
       res.json(merged);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -301,9 +323,7 @@ async function startServer() {
       const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
       const threshold = parseInt(thresholdRow?.value || '7');
 
-      // Re-use logic from /api/local/onus internally or just fetch it
-      const onusRes = await axios.get(`http://localhost:3000/api/local/onus`);
-      const onus = onusRes.data;
+      const onus = await getOnusWithStatus();
 
       const portMap = new Map();
       onus.forEach((o: any) => {
@@ -351,12 +371,10 @@ async function startServer() {
   setInterval(async () => {
     try {
       console.log("[CRON] Checking for port status changes...");
-      
       const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
       const threshold = parseInt(thresholdRow?.value || '7');
 
-      const statusRes = await axios.get(`http://127.0.0.1:3000/api/local/onus`);
-      const onus = statusRes.data;
+      const onus = await getOnusWithStatus();
 
       const portMap = new Map();
       onus.forEach((o: any) => {
@@ -418,12 +436,10 @@ async function startServer() {
         }
       }
 
-      // 3. Periodic Status Report (AS REQUESTED: Every 60 seconds send "Puertos Caídos")
+      // 3. Periodic Status Report
       if (currentFallen.length > 0) {
         console.log(`[CRON] Sending minutely status report for ${currentFallen.length} fallen ports...`);
         await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: currentFallen });
-      } else {
-        console.log("[CRON] No fallen ports to report in status cycle.");
       }
 
     } catch (err: any) {
