@@ -36,12 +36,14 @@ async function initDB() {
       hardware_type TEXT,
       status TEXT,
       raw_data TEXT,
-      upload_speed TEXT,
-      download_speed TEXT,
-      status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration: Add new columns if they don't exist
+  try { await db.exec("ALTER TABLE onus ADD COLUMN upload_speed TEXT"); } catch(e) {}
+  try { await db.exec("ALTER TABLE onus ADD COLUMN download_speed TEXT"); } catch(e) {}
+  try { await db.exec("ALTER TABLE onus ADD COLUMN status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP"); } catch(e) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS sync_logs (
