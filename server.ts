@@ -141,36 +141,43 @@ async function startServer() {
 
       // Upsert into SQLite
       let inserted = 0;
-      for (const onu of rawOnus) {
-        const sn = (onu.sn || onu.onu_sn || onu.serial_number || onu.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-        if (!sn) continue;
+      await db.run("BEGIN TRANSACTION");
+      try {
+        for (const onu of rawOnus) {
+          const sn = (onu.sn || onu.onu_sn || onu.serial_number || onu.serial || "").toString().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+          if (!sn) continue;
+
+          await db.run(
+            `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, raw_data, last_updated)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(sn) DO UPDATE SET 
+              name=excluded.name, 
+              unique_external_id=excluded.unique_external_id,
+              olt_id=excluded.olt_id, 
+              board=excluded.board, 
+              port=excluded.port, 
+              onu=excluded.onu,
+              zone_id=excluded.zone_id,
+              hardware_type=excluded.hardware_type,
+              status=excluded.status,
+              raw_data=excluded.raw_data,
+              last_updated=CURRENT_TIMESTAMP`,
+            [
+              sn, onu.name || `ONU ${sn}`, onu.unique_external_id, onu.olt_id, onu.board, onu.port, onu.onu, onu.zone_id, onu.onu_type_name || onu.hardware_type, onu.status, JSON.stringify(onu)
+            ]
+          );
+          inserted++;
+        }
 
         await db.run(
-          `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, raw_data, last_updated)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(sn) DO UPDATE SET 
-            name=excluded.name, 
-            unique_external_id=excluded.unique_external_id,
-            olt_id=excluded.olt_id, 
-            board=excluded.board, 
-            port=excluded.port, 
-            onu=excluded.onu,
-            zone_id=excluded.zone_id,
-            hardware_type=excluded.hardware_type,
-            status=excluded.status,
-            raw_data=excluded.raw_data,
-            last_updated=CURRENT_TIMESTAMP`,
-          [
-            sn, onu.name || `ONU ${sn}`, onu.unique_external_id, onu.olt_id, onu.board, onu.port, onu.onu, onu.zone_id, onu.onu_type_name || onu.hardware_type, onu.status, JSON.stringify(onu)
-          ]
+          `INSERT INTO sync_logs (sync_type, inserted_count, sync_time) VALUES (?, ?, CURRENT_TIMESTAMP)`,
+          [usedFallback ? 'FALLBACK' : 'FULL', inserted]
         );
-        inserted++;
+        await db.run("COMMIT");
+      } catch (err) {
+        await db.run("ROLLBACK");
+        throw err;
       }
-
-      await db.run(
-        `INSERT INTO sync_logs (sync_type, inserted_count, sync_time) VALUES (?, ?, CURRENT_TIMESTAMP)`,
-        [usedFallback ? 'FALLBACK' : 'FULL', inserted]
-      );
 
       res.json({ success: true, count: inserted, fallback: usedFallback });
     } catch (error: any) {
