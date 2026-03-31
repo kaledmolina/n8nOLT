@@ -50,6 +50,12 @@ async function initDB() {
   if (!columnNames.includes('download_speed')) {
     await db.exec("ALTER TABLE onus ADD COLUMN download_speed TEXT");
   }
+  if (!columnNames.includes('address')) {
+    await db.exec("ALTER TABLE onus ADD COLUMN address TEXT");
+  }
+  if (!columnNames.includes('comment')) {
+    await db.exec("ALTER TABLE onus ADD COLUMN comment TEXT");
+  }
   if (!columnNames.includes('status_changed_at')) {
     await db.exec("ALTER TABLE onus ADD COLUMN status_changed_at DATETIME");
     await db.run("UPDATE onus SET status_changed_at = CURRENT_TIMESTAMP WHERE status_changed_at IS NULL");
@@ -283,8 +289,8 @@ async function startServer() {
           if (!sn) continue;
 
           await db.run(
-            `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, status_changed_at, raw_data, last_updated)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+            `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, address, comment, status_changed_at, raw_data, last_updated)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
              ON CONFLICT(sn) DO UPDATE SET 
               name=excluded.name, 
               unique_external_id=excluded.unique_external_id,
@@ -294,12 +300,14 @@ async function startServer() {
               onu=excluded.onu,
               zone_id=excluded.zone_id,
               hardware_type=excluded.hardware_type,
+              address=excluded.address,
+              comment=excluded.comment,
               status_changed_at = CASE WHEN status != excluded.status THEN CURRENT_TIMESTAMP ELSE status_changed_at END,
               status=excluded.status,
               raw_data=excluded.raw_data,
               last_updated=CURRENT_TIMESTAMP`,
             [
-              sn, onu.name || `ONU ${sn}`, onu.unique_external_id, onu.olt_id, onu.board, onu.port, onu.onu, onu.zone_id, onu.onu_type_name || onu.hardware_type, onu.status, JSON.stringify(onu)
+              sn, onu.name || `ONU ${sn}`, onu.unique_external_id, onu.olt_id, onu.board, onu.port, onu.onu, onu.zone_id, onu.onu_type_name || onu.hardware_type, onu.status, onu.address || '', onu.comment || '', JSON.stringify(onu)
             ]
           );
           inserted++;
@@ -436,11 +444,15 @@ async function startServer() {
       onus.forEach((o: any) => {
         const key = `${o.olt_id}-${o.board}-${o.port}`;
         if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0 });
+          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, barrios: new Set() });
         }
         const p = portMap.get(key);
         p.total++;
-        if (o.status?.toLowerCase() === 'los') p.los++;
+        if (o.status?.toLowerCase() === 'los') {
+          p.los++;
+          const barrio = (o.address || o.comment || "").trim();
+          if (barrio) p.barrios.add(barrio);
+        }
       });
 
       const currentFallen = Array.from(portMap.values())
@@ -452,7 +464,8 @@ async function startServer() {
           port: p.port,
           total: p.total,
           los: p.los,
-          percentage: Math.round((p.los / p.total) * 100)
+          percentage: Math.round((p.los / p.total) * 100),
+          barrios: Array.from(p.barrios).slice(0, 5) // Limit to top 5 to avoid long messages
         }));
 
       const previousAlerts = await db.all("SELECT * FROM port_alerts WHERE status = 'FALLEN'");
@@ -465,7 +478,7 @@ async function startServer() {
 
       if (newAlerts.length > 0) {
         console.log(`[CRON] Detected ${newAlerts.length} NEW fallen ports. Sending ALERT to n8n...`);
-        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: newAlerts });
+        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: currentFallen });
         for (const p of newAlerts) {
           await db.run(
             "INSERT INTO port_alerts (port_key, last_percentage, status, last_notified) VALUES (?, ?, 'FALLEN', CURRENT_TIMESTAMP) ON CONFLICT(port_key) DO UPDATE SET status='FALLEN', last_percentage=excluded.last_percentage, last_notified=CURRENT_TIMESTAMP",
@@ -486,10 +499,7 @@ async function startServer() {
         }
       }
 
-      if (currentFallen.length > 0) {
-        console.log(`[CRON] Sending minutely status report for ${currentFallen.length} fallen ports...`);
-        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: currentFallen });
-      }
+
 
     } catch (err: any) {
       console.error("[CRON] Status check failed:", err.message);
