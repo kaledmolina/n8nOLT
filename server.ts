@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import axios from "axios";
 import path from "path";
@@ -9,15 +10,16 @@ import { open } from 'sqlite';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const API_KEY = "3332756bd57545ba99a55b54fa666c18";
-const TARGET_HOST = "intalnet.vortex-m2.com";
-const N8N_WEBHOOK_URL = "https://n8n.intalnet.com/webhook/smartolt-report";
+const API_KEY = process.env.SMARTOLT_API_KEY || "3332756bd57545ba99a55b54fa666c18";
+const TARGET_HOST = process.env.SMARTOLT_TARGET_HOST || "intalnet.vortex-m2.com";
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || "https://n8n.intalnet.com/webhook/smartolt-report";
 
 let db: any;
 
 async function initDB() {
+  const dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, 'smartolt_cache.db');
   db = await open({
-    filename: path.join(__dirname, 'smartolt_cache.db'),
+    filename: dbPath,
     driver: sqlite3.Database
   });
 

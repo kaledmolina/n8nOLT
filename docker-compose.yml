@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  n8nolt:
+    build: .
+    container_name: n8nolt_app
+    ports:
+      - "8005:3000"
+    volumes:
+      - n8nolt_data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      # Ensure sqlite db is saved to the volume
+      - SQLITE_DB_PATH=/app/data/smartolt_cache.db
+
+volumes:
+  n8nolt_data:
