@@ -56,6 +56,15 @@ async function initDB() {
     )
   `);
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS port_alerts (
+      port_key TEXT PRIMARY KEY,
+      last_percentage INTEGER,
+      status TEXT,
+      last_notified DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Set default threshold if not exists
   await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('FALLEN_PORT_THRESHOLD', '7')");
 
