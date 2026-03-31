@@ -20,6 +20,7 @@ WORKDIR /app
 # Copy package files and install production dependencies
 COPY package*.json ./
 RUN npm ci --omit=dev
+RUN npm rebuild sqlite3 --build-from-source
 
 # Copy built frontend assets and server files
 COPY --from=builder /app/dist ./dist
