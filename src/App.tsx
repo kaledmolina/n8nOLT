@@ -139,6 +139,49 @@ export default function App() {
     return olt ? (olt.name || olt.olt_name || `OLT ${id}`) : `OLT ${id}`;
   }, [olts]);
 
+  const [specialOnus, setSpecialOnus] = useState<any[]>([]);
+  const [newSpecialSN, setNewSpecialSN] = useState("");
+  const [specialAlertConfig, setSpecialAlertConfig] = useState({ los: true, power: true, offline: false });
+  const [addingSpecial, setAddingSpecial] = useState(false);
+
+  const fetchSpecialOnus = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/local/special-onus');
+      setSpecialOnus(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error("Failed to fetch special onus:", err);
+    }
+  }, []);
+
+  const addSpecialOnu = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSpecialSN) return;
+    setAddingSpecial(true);
+    try {
+      await axios.post('/api/local/special-onus', {
+        sn: newSpecialSN,
+        alert_on_los: specialAlertConfig.los,
+        alert_on_power_fail: specialAlertConfig.power,
+        alert_on_offline: specialAlertConfig.offline
+      });
+      setNewSpecialSN("");
+      fetchSpecialOnus();
+    } catch (err) {
+      console.error("Failed to add special onu:", err);
+    } finally {
+      setAddingSpecial(false);
+    }
+  };
+
+  const removeSpecialOnu = async (sn: string) => {
+    try {
+      await axios.delete(`/api/local/special-onus/${sn}`);
+      fetchSpecialOnus();
+    } catch (err) {
+      console.error("Failed to remove special onu:", err);
+    }
+  };
+
   const fetchOnuHistory = async (sn: string) => {
     if (!subdomain || !apiKey) return;
     setHistoryLoading(true);
@@ -278,11 +321,15 @@ export default function App() {
       checkConnection();
       fetchSettings();
       fetchONUs();
+      fetchSpecialOnus();
       
-      const interval = setInterval(() => fetchONUs(true), 60000); 
+      const interval = setInterval(() => {
+        fetchONUs(true);
+        fetchSpecialOnus();
+      }, 60000); 
       return () => clearInterval(interval);
     }
-  }, [checkConnection, fetchONUs, subdomain, apiKey, isAuthenticated, fetchSettings]);
+  }, [checkConnection, fetchONUs, subdomain, apiKey, isAuthenticated, fetchSettings, fetchSpecialOnus]);
 
   const filteredOnus = onus.filter(o => 
     (o.name || "").toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -736,6 +783,134 @@ export default function App() {
             </div>
           );
         })()}
+
+        {/* Critical Monitoring Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+          {/* Add Form */}
+          <div className="lg:col-span-1 bg-white border border-[#141414]/10 p-6 shadow-sm">
+            <h3 className="text-sm font-serif italic mb-4 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              Nueva Alerta Especial
+            </h3>
+            <form onSubmit={addSpecialOnu} className="space-y-4">
+              <div>
+                <label className="block text-[9px] uppercase font-bold tracking-widest opacity-40 mb-1">SN / Serial Number</label>
+                <input 
+                  type="text" 
+                  value={newSpecialSN}
+                  onChange={(e) => setNewSpecialSN(e.target.value.toUpperCase())}
+                  placeholder="Ej: ZTEGC1234567"
+                  className="w-full bg-slate-50 border border-[#141414]/10 px-3 py-2 text-xs font-mono focus:outline-none focus:border-[#141414] transition-colors rounded-sm"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-[9px] uppercase font-bold tracking-widest opacity-40 mb-2">Triggers de Alerta</label>
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input 
+                    type="checkbox" 
+                    checked={specialAlertConfig.los}
+                    onChange={(e) => setSpecialAlertConfig({...specialAlertConfig, los: e.target.checked})}
+                    className="w-3 h-3 accent-[#141414]"
+                  />
+                  <span className="text-[10px] uppercase font-bold tracking-wide group-hover:opacity-70 transition-opacity">LOS (Red Light)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input 
+                    type="checkbox" 
+                    checked={specialAlertConfig.power}
+                    onChange={(e) => setSpecialAlertConfig({...specialAlertConfig, power: e.target.checked})}
+                    className="w-3 h-3 accent-[#141414]"
+                  />
+                  <span className="text-[10px] uppercase font-bold tracking-wide group-hover:opacity-70 transition-opacity">Power Fail</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input 
+                    type="checkbox" 
+                    checked={specialAlertConfig.offline}
+                    onChange={(e) => setSpecialAlertConfig({...specialAlertConfig, offline: e.target.checked})}
+                    className="w-3 h-3 accent-[#141414]"
+                  />
+                  <span className="text-[10px] uppercase font-bold tracking-wide group-hover:opacity-70 transition-opacity">Offline (General)</span>
+                </label>
+              </div>
+              <button 
+                type="submit"
+                disabled={addingSpecial || !newSpecialSN}
+                className="w-full bg-[#141414] text-[#E4E3E0] py-2 text-[10px] font-black uppercase tracking-widest hover:opacity-90 transition-opacity disabled:opacity-20 rounded-sm"
+              >
+                {addingSpecial ? "Agregando..." : "Activar Monitoreo"}
+              </button>
+            </form>
+          </div>
+
+          {/* List */}
+          <div className="lg:col-span-2 bg-white border border-[#141414]/10 shadow-sm flex flex-col">
+            <div className="px-6 py-3 border-b border-[#141414]/5 bg-slate-50 flex justify-between items-center">
+              <h3 className="text-xs uppercase font-black tracking-widest">Monitoreo Crítico Individual</h3>
+              <span className="text-[9px] font-mono opacity-40">{specialOnus.length} ONUs activas</span>
+            </div>
+            <div className="flex-1 overflow-y-auto max-h-[300px] custom-scrollbar">
+              {specialOnus.length === 0 ? (
+                <div className="h-full flex flex-center flex-col items-center justify-center p-12 opacity-20 italic">
+                  <Info className="w-8 h-8 mb-2" />
+                  <p className="text-xs italic">No hay ONUs en monitoreo especial.</p>
+                </div>
+              ) : (
+                <table className="w-full text-left text-xs">
+                  <thead className="sticky top-0 bg-white shadow-sm">
+                    <tr className="text-[9px] uppercase font-bold opacity-40 border-b border-[#141414]/5">
+                      <th className="px-6 py-3">Nombre / SN</th>
+                      <th className="px-6 py-3">Estado Actual</th>
+                      <th className="px-6 py-3">Reglas</th>
+                      <th className="px-6 py-3 text-right">Acción</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#141414]/5">
+                    {specialOnus.map((s, i) => {
+                      const cached = onus.find(o => o.sn === s.sn);
+                      return (
+                        <tr key={i} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="font-bold mb-0.5">{s.name}</div>
+                            <div className="font-mono text-[10px] text-blue-500">{s.sn}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-2">
+                              <div className={cn(
+                                "w-2 h-2 rounded-full",
+                                cached?.status?.toLowerCase() === 'online' ? "bg-emerald-500" : "bg-rose-500 animate-pulse"
+                              )} />
+                              <span className="font-mono uppercase text-[10px] font-bold">
+                                {cached?.status || "Unknown"}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex gap-1">
+                              {s.alert_on_los === 1 && <span className="px-1.5 py-0.5 bg-rose-500/10 text-rose-600 rounded text-[8px] font-bold">LOS</span>}
+                              {s.alert_on_power_fail === 1 && <span className="px-1.5 py-0.5 bg-amber-500/10 text-amber-600 rounded text-[8px] font-bold">PWR</span>}
+                              {s.alert_on_offline === 1 && <span className="px-1.5 py-0.5 bg-slate-500/10 text-slate-600 rounded text-[8px] font-bold">OFF</span>}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-right">
+                            <button 
+                              onClick={() => removeSpecialOnu(s.sn)}
+                              className="text-rose-500 hover:text-rose-700 p-1 transition-colors"
+                              title="Eliminar Monitoreo"
+                            >
+                              <XCircle className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
         
         {/* PON Status Section */}
         {(() => {

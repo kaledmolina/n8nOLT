@@ -91,6 +91,18 @@ async function initDB() {
     )
   `);
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS special_onus (
+      sn TEXT PRIMARY KEY,
+      name TEXT,
+      alert_on_los INTEGER DEFAULT 1,
+      alert_on_power_fail INTEGER DEFAULT 1,
+      alert_on_offline INTEGER DEFAULT 0,
+      last_status TEXT,
+      last_notified DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Set default threshold if not exists
   await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('FALLEN_PORT_THRESHOLD', '7')");
 
@@ -406,6 +418,53 @@ async function startServer() {
     }
   });
 
+  // Local API - Special ONUs Management (Protected)
+  app.get("/api/local/special-onus", requireAuth, async (req, res) => {
+    try {
+      const rows = await db.all("SELECT * FROM special_onus");
+      res.json(rows);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/local/special-onus", requireAuth, async (req, res) => {
+    try {
+      const { sn, name, alert_on_los, alert_on_power_fail, alert_on_offline } = req.body;
+      if (!sn) return res.status(400).json({ error: "Serial number is required" });
+
+      // Check if ONU exists in main cache to get name if not provided
+      let finalName = name;
+      if (!finalName) {
+        const onu = await db.get("SELECT name FROM onus WHERE sn = ?", [sn.toUpperCase()]);
+        finalName = onu?.name || `ONU ${sn}`;
+      }
+
+      await db.run(
+        `INSERT INTO special_onus (sn, name, alert_on_los, alert_on_power_fail, alert_on_offline)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(sn) DO UPDATE SET 
+          name=excluded.name,
+          alert_on_los=excluded.alert_on_los,
+          alert_on_power_fail=excluded.alert_on_power_fail,
+          alert_on_offline=excluded.alert_on_offline`,
+        [sn.toUpperCase(), finalName, alert_on_los ? 1 : 0, alert_on_power_fail ? 1 : 0, alert_on_offline ? 1 : 0]
+      );
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/local/special-onus/:sn", requireAuth, async (req, res) => {
+    try {
+      await db.run("DELETE FROM special_onus WHERE sn = ?", [req.params.sn.toUpperCase()]);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Local API - Settings Management (Protected)
   app.get("/api/local/settings", requireAuth, async (req, res) => {
     try {
@@ -555,6 +614,50 @@ async function startServer() {
         await axios.post(N8N_WEBHOOK_URL, { type: 'RECOVERY', ports: recoveredData });
         for (const key of recoveredKeys) {
           await db.run("UPDATE port_alerts SET status = 'RECOVERED', last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [key]);
+        }
+      }
+
+      // --- SPECIAL ONUS MONITORING ---
+      const specialOnusList = await db.all("SELECT * FROM special_onus");
+      for (const spec of specialOnusList) {
+        // Encontrar estado actual en nuestra caché de ONUs
+        const currentOnu = onus.find(o => o.sn === spec.sn);
+        if (!currentOnu) continue;
+
+        const currentStatus = (currentOnu.status || "Unknown").toLowerCase();
+        const lastStatus = (spec.last_status || "online").toLowerCase();
+
+        if (currentStatus !== lastStatus) {
+           let shouldAlert = false;
+           let type = "SPECIAL_ALERT";
+
+           if (currentStatus === "online" && lastStatus !== "online") {
+              shouldAlert = true;
+              type = "SPECIAL_RECOVERY";
+           } else if (currentStatus === "los" && spec.alert_on_los) {
+              shouldAlert = true;
+           } else if (currentStatus === "power fail" && spec.alert_on_power_fail) {
+              shouldAlert = true;
+           } else if (currentStatus === "offline" && spec.alert_on_offline) {
+              shouldAlert = true;
+           }
+
+           if (shouldAlert) {
+              console.log(`[CRON] Special ONU ${spec.sn} changed status from ${lastStatus} to ${currentStatus}. Sending n8n...`);
+              await axios.post(N8N_WEBHOOK_URL, { 
+                type, 
+                onu: {
+                  sn: currentOnu.sn,
+                  name: currentOnu.name,
+                  status: currentOnu.status,
+                  olt_id: currentOnu.olt_id,
+                  board: currentOnu.board,
+                  port: currentOnu.port,
+                  zone: currentOnu.zone_name || currentOnu.zone_id
+                }
+              });
+              await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP WHERE sn = ?", [currentStatus, spec.sn]);
+           }
         }
       }
 
