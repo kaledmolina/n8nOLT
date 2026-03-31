@@ -220,6 +220,8 @@ async function startServer() {
   await initDB();
   const app = express();
   const PORT = 3000;
+  
+  app.set('trust proxy', 1); 
 
   app.use(express.json());
   app.use(cookieParser());
@@ -227,8 +229,10 @@ async function startServer() {
     secret: process.env.SESSION_SECRET || 'smartolt-monitor-secret-key-2026',
     resave: false,
     saveUninitialized: false,
+    proxy: true,
     cookie: { 
-      secure: process.env.NODE_ENV === 'production',
+      secure: true, 
+      sameSite: 'lax',
       maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
   }));
