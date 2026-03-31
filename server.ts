@@ -41,9 +41,18 @@ async function initDB() {
   `);
 
   // Migration: Add new columns if they don't exist
-  try { await db.exec("ALTER TABLE onus ADD COLUMN upload_speed TEXT"); } catch(e) {}
-  try { await db.exec("ALTER TABLE onus ADD COLUMN download_speed TEXT"); } catch(e) {}
-  try { await db.exec("ALTER TABLE onus ADD COLUMN status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP"); } catch(e) {}
+  const columns = await db.all("PRAGMA table_info(onus)");
+  const columnNames = columns.map((c: any) => c.name);
+
+  if (!columnNames.includes('upload_speed')) {
+    await db.exec("ALTER TABLE onus ADD COLUMN upload_speed TEXT");
+  }
+  if (!columnNames.includes('download_speed')) {
+    await db.exec("ALTER TABLE onus ADD COLUMN download_speed TEXT");
+  }
+  if (!columnNames.includes('status_changed_at')) {
+    await db.exec("ALTER TABLE onus ADD COLUMN status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP");
+  }
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS sync_logs (
@@ -161,7 +170,6 @@ async function getOnusWithStatus() {
 // Background enrichment task for Speed Profiles
 async function enrichOnuSpeeds() {
   try {
-    // Fetch 5 ONUs missing speed data
     const candidates = await db.all(
       "SELECT sn, unique_external_id FROM onus WHERE upload_speed IS NULL AND unique_external_id IS NOT NULL LIMIT 5"
     );
@@ -184,13 +192,11 @@ async function enrichOnuSpeeds() {
         }
       } catch (err: any) {
          if (err.response?.status === 400 || err.response?.status === 404) {
-           // ONU not found, mark as Unknown to skip next time
            await db.run("UPDATE onus SET upload_speed='Unknown', download_speed='Unknown' WHERE sn=?", [onu.sn]);
          } else {
            throw err;
          }
       }
-      // Small delay between requests as requested by user's "rate restriction" hint
       await new Promise(r => setTimeout(r, 1000));
     }
   } catch (err: any) {
@@ -246,9 +252,9 @@ async function startServer() {
         const detailsRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_all_onus_details`, axiosConfig);
         rawOnus = Array.isArray(detailsRes.data) ? detailsRes.data : (detailsRes.data.onus || detailsRes.data.data || []);
       } catch (err: any) {
-        if (err.response?.status === 403) {
-          console.warn("403 Rate Limit on details. Falling back to signals for sync.");
-          usedFallback = true;
+        console.warn(`[Sync] Primary sync failed (${err.response?.status || err.message}). Switching to fallback signals.`);
+        usedFallback = true;
+        try {
           const signalsRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_signals`, axiosConfig);
           const sigs = Array.isArray(signalsRes.data) ? signalsRes.data : (signalsRes.data.response || signalsRes.data.data || []);
           rawOnus = sigs.map((s: any) => ({
@@ -261,8 +267,9 @@ async function startServer() {
             zone_id: s.zone_id,
             status: s.status || 'Unknown'
           }));
-        } else {
-          throw err;
+        } catch (fallbackErr: any) {
+             console.error("[Sync] Fallback signals also failed:", fallbackErr.message);
+             throw fallbackErr;
         }
       }
 
@@ -324,7 +331,7 @@ async function startServer() {
     }
   });
 
-  // Local API - Get ONUs (merges DB with live status)
+  // Local API - Get ONUs
   app.get("/api/local/onus", async (req, res) => {
     try {
       const merged = await getOnusWithStatus();
@@ -413,11 +420,9 @@ async function startServer() {
   });
 
   // --- BACKGROUND WORKER FOR SPEED ENRICHMENT ---
-  // Runs every 30 seconds to fetch detail for 5 ONUs
   setInterval(enrichOnuSpeeds, 30000);
 
   // --- BACKGROUND CRON FOR N8N ---
-  // Calculates fallen ports and pushes to n8n every 60 seconds
   setInterval(async () => {
     try {
       console.log("[CRON] Checking for port status changes...");
@@ -449,7 +454,6 @@ async function startServer() {
           percentage: Math.round((p.los / p.total) * 100)
         }));
 
-      // Get previous state from DB
       const previousAlerts = await db.all("SELECT * FROM port_alerts WHERE status = 'FALLEN'");
       const previousMap = new Map(previousAlerts.map(a => [a.port_key, a]));
 
@@ -458,11 +462,9 @@ async function startServer() {
         .filter(a => !currentFallen.some(p => p.key === a.port_key))
         .map(a => a.port_key);
 
-      // 1. Send NEW ALERTS
       if (newAlerts.length > 0) {
         console.log(`[CRON] Detected ${newAlerts.length} NEW fallen ports. Sending ALERT to n8n...`);
         await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: newAlerts });
-        
         for (const p of newAlerts) {
           await db.run(
             "INSERT INTO port_alerts (port_key, last_percentage, status, last_notified) VALUES (?, ?, 'FALLEN', CURRENT_TIMESTAMP) ON CONFLICT(port_key) DO UPDATE SET status='FALLEN', last_percentage=excluded.last_percentage, last_notified=CURRENT_TIMESTAMP",
@@ -471,22 +473,18 @@ async function startServer() {
         }
       }
 
-      // 2. Send RECOVERIES
       if (recoveredKeys.length > 0) {
         console.log(`[CRON] Detected ${recoveredKeys.length} RECOVERED ports. Sending RECOVERY to n8n...`);
         const recoveredData = previousAlerts.filter(a => recoveredKeys.includes(a.port_key)).map(a => {
           const [olt_id, board, port] = a.port_key.split('-');
           return { olt_id, board, port, key: a.port_key };
         });
-
         await axios.post(N8N_WEBHOOK_URL, { type: 'RECOVERY', ports: recoveredData });
-
         for (const key of recoveredKeys) {
           await db.run("UPDATE port_alerts SET status = 'RECOVERED', last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [key]);
         }
       }
 
-      // 3. Periodic Status Report
       if (currentFallen.length > 0) {
         console.log(`[CRON] Sending minutely status report for ${currentFallen.length} fallen ports...`);
         await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: currentFallen });

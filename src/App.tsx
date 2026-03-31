@@ -65,6 +65,7 @@ export default function App() {
   const [selectedPortFilter, setSelectedPortFilter] = useState('all');
   const [refreshing, setRefreshing] = useState(false);
   const [onusThreshold, setOnusThreshold] = useState<number>(7);
+  const [syncFallback, setSyncFallback] = useState(false);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -148,6 +149,7 @@ export default function App() {
     try {
       const res = await axios.post('/api/local/sync');
       setDataMode(res.data.fallback ? 'fallback' : 'live');
+      setSyncFallback(!!res.data.fallback);
       await fetchONUs();
     } catch (err: any) {
       console.error("Sync Error:", err);
@@ -524,6 +526,17 @@ export default function App() {
                   Tip: Make sure your API Key is correct and "Allowed from anywhere" is set in SmartOLT Settings {"->"} API.
                 </p>
               )}
+            </div>
+          </div>
+        )}
+
+        {syncFallback && (
+          <div className="mb-8 p-4 bg-amber-500/10 border border-amber-500/20 text-amber-600 flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <div className="text-sm">
+              <p className="font-bold uppercase tracking-widest text-[10px] mb-1">Sincronización Limitada (Rate Limit)</p>
+              <p>SmartOLT ha limitado las peticiones de detalles. Los estados básicos están actualizados, pero los detalles técnicos (distancia, ODB, etc.) podrían ser antiguos.</p>
+              <p className="mt-1 text-[10px] opacity-70 italic">Límite: Máximo 3 sincronizaciones detalladas por hora.</p>
             </div>
           </div>
         )}
