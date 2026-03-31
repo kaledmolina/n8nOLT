@@ -430,15 +430,18 @@ async function startServer() {
 
   app.post("/api/local/special-onus", requireAuth, async (req, res) => {
     try {
-      const { sn, name, alert_on_los, alert_on_power_fail, alert_on_offline } = req.body;
+      let { sn, name, alert_on_los, alert_on_power_fail, alert_on_offline } = req.body;
       if (!sn) return res.status(400).json({ error: "Serial number is required" });
+      
+      sn = sn.trim().toUpperCase();
 
-      // Check if ONU exists in main cache to get name if not provided
-      let finalName = name;
-      if (!finalName) {
-        const onu = await db.get("SELECT name FROM onus WHERE sn = ?", [sn.toUpperCase()]);
-        finalName = onu?.name || `ONU ${sn}`;
+      // STRICT VALIDATION: Check if ONU exists in main cache
+      const onu = await db.get("SELECT name FROM onus WHERE sn = ?", [sn]);
+      if (!onu) {
+        return res.status(404).json({ error: "La ONU no existe o no ha sido sincronizada todavía." });
       }
+
+      const finalName = name || onu.name || `ONU ${sn}`;
 
       await db.run(
         `INSERT INTO special_onus (sn, name, alert_on_los, alert_on_power_fail, alert_on_offline)
@@ -448,7 +451,7 @@ async function startServer() {
           alert_on_los=excluded.alert_on_los,
           alert_on_power_fail=excluded.alert_on_power_fail,
           alert_on_offline=excluded.alert_on_offline`,
-        [sn.toUpperCase(), finalName, alert_on_los ? 1 : 0, alert_on_power_fail ? 1 : 0, alert_on_offline ? 1 : 0]
+        [sn, finalName, alert_on_los ? 1 : 0, alert_on_power_fail ? 1 : 0, alert_on_offline ? 1 : 0]
       );
       res.json({ success: true });
     } catch (error: any) {

@@ -143,6 +143,7 @@ export default function App() {
   const [newSpecialSN, setNewSpecialSN] = useState("");
   const [specialAlertConfig, setSpecialAlertConfig] = useState({ los: true, power: true, offline: false });
   const [addingSpecial, setAddingSpecial] = useState(false);
+  const [specialError, setSpecialError] = useState<string | null>(null);
 
   const fetchSpecialOnus = useCallback(async () => {
     try {
@@ -157,6 +158,7 @@ export default function App() {
     e.preventDefault();
     if (!newSpecialSN) return;
     setAddingSpecial(true);
+    setSpecialError(null);
     try {
       await axios.post('/api/local/special-onus', {
         sn: newSpecialSN,
@@ -166,8 +168,8 @@ export default function App() {
       });
       setNewSpecialSN("");
       fetchSpecialOnus();
-    } catch (err) {
-      console.error("Failed to add special onu:", err);
+    } catch (err: any) {
+      setSpecialError(err.response?.data?.error || "Error al agregar la ONU.");
     } finally {
       setAddingSpecial(false);
     }
@@ -804,6 +806,14 @@ export default function App() {
                   required
                 />
               </div>
+
+              {specialError && (
+                <div className="p-2 bg-rose-500/10 border border-rose-500/20 text-rose-500 text-[10px] font-bold uppercase tracking-wider flex items-center gap-2">
+                  <Activity className="w-3 h-3" />
+                  {specialError}
+                </div>
+              )}
+
               <div className="space-y-2">
                 <label className="block text-[9px] uppercase font-bold tracking-widest opacity-40 mb-2">Triggers de Alerta</label>
                 <label className="flex items-center gap-2 cursor-pointer group">
