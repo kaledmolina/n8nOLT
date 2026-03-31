@@ -51,7 +51,8 @@ async function initDB() {
     await db.exec("ALTER TABLE onus ADD COLUMN download_speed TEXT");
   }
   if (!columnNames.includes('status_changed_at')) {
-    await db.exec("ALTER TABLE onus ADD COLUMN status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP");
+    await db.exec("ALTER TABLE onus ADD COLUMN status_changed_at DATETIME");
+    await db.run("UPDATE onus SET status_changed_at = CURRENT_TIMESTAMP WHERE status_changed_at IS NULL");
   }
 
   await db.exec(`
