@@ -36,6 +36,9 @@ async function initDB() {
       hardware_type TEXT,
       status TEXT,
       raw_data TEXT,
+      upload_speed TEXT,
+      download_speed TEXT,
+      status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -153,6 +156,46 @@ async function getOnusWithStatus() {
   return merged;
 }
 
+// Background enrichment task for Speed Profiles
+async function enrichOnuSpeeds() {
+  try {
+    // Fetch 5 ONUs missing speed data
+    const candidates = await db.all(
+      "SELECT sn, unique_external_id FROM onus WHERE upload_speed IS NULL AND unique_external_id IS NOT NULL LIMIT 5"
+    );
+
+    if (candidates.length === 0) return;
+
+    console.log(`[ENRICH] Fetching speed profiles for ${candidates.length} ONUs...`);
+    for (const onu of candidates) {
+      try {
+        const res = await axios.get(`https://${TARGET_HOST}/api/onu/get_onu_speed_profiles/${onu.unique_external_id}`, axiosConfig);
+        const data = res.data;
+        if (data && data.status) {
+          const upload = data.response?.upload_speed_profile_name || "Unknown";
+          const download = data.response?.download_speed_profile_name || "Unknown";
+          
+          await db.run(
+            "UPDATE onus SET upload_speed = ?, download_speed = ? WHERE sn = ?",
+            [upload, download, onu.sn]
+          );
+        }
+      } catch (err: any) {
+         if (err.response?.status === 400 || err.response?.status === 404) {
+           // ONU not found, mark as Unknown to skip next time
+           await db.run("UPDATE onus SET upload_speed='Unknown', download_speed='Unknown' WHERE sn=?", [onu.sn]);
+         } else {
+           throw err;
+         }
+      }
+      // Small delay between requests as requested by user's "rate restriction" hint
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  } catch (err: any) {
+    console.error("[ENRICH] Speed profile fetch failed:", err.message);
+  }
+}
+
 async function startServer() {
   await initDB();
   const app = express();
@@ -230,8 +273,8 @@ async function startServer() {
           if (!sn) continue;
 
           await db.run(
-            `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, raw_data, last_updated)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            `INSERT INTO onus (sn, name, unique_external_id, olt_id, board, port, onu, zone_id, hardware_type, status, status_changed_at, raw_data, last_updated)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
              ON CONFLICT(sn) DO UPDATE SET 
               name=excluded.name, 
               unique_external_id=excluded.unique_external_id,
@@ -241,6 +284,7 @@ async function startServer() {
               onu=excluded.onu,
               zone_id=excluded.zone_id,
               hardware_type=excluded.hardware_type,
+              status_changed_at = CASE WHEN status != excluded.status THEN CURRENT_TIMESTAMP ELSE status_changed_at END,
               status=excluded.status,
               raw_data=excluded.raw_data,
               last_updated=CURRENT_TIMESTAMP`,
@@ -365,6 +409,10 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // --- BACKGROUND WORKER FOR SPEED ENRICHMENT ---
+  // Runs every 30 seconds to fetch detail for 5 ONUs
+  setInterval(enrichOnuSpeeds, 30000);
 
   // --- BACKGROUND CRON FOR N8N ---
   // Calculates fallen ports and pushes to n8n every 60 seconds

@@ -29,6 +29,9 @@ interface ONU {
   signal?: string;
   onu_type_name?: string;
   zone?: string;
+  status_changed_at?: string;
+  upload_speed?: string;
+  download_speed?: string;
 }
 
 export default function App() {
@@ -255,6 +258,21 @@ export default function App() {
       default: return "text-slate-300 bg-slate-300/10";
     }
   };
+  
+  const timeAgo = (dateStr?: string) => {
+    if (!dateStr) return "N/A";
+    const date = new Date(dateStr + (dateStr.endsWith('Z') ? '' : 'Z'));
+    const now = new Date();
+    const diffMs = Math.abs(now.getTime() - date.getTime());
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMins < 1) return "Just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${diffDays}d ago`;
+  };
 
   return (
     <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0]">
@@ -389,6 +407,8 @@ export default function App() {
                   <thead>
                     <tr className="border-b border-slate-100 text-[10px] uppercase font-bold text-[#141414]/40 bg-white">
                       <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4">Sincronismo</th>
+                      <th className="px-6 py-4">Velocidad (UP/DOWN)</th>
                       <th className="px-6 py-4">Signal</th>
                       <th className="px-6 py-4">Distance</th>
                       <th className="px-6 py-4">Name</th>
@@ -423,6 +443,19 @@ export default function App() {
                             )}>
                               {onu.status || "Unknown"}
                             </span>
+                          </td>
+                          <td className="px-6 py-4 text-[10px] font-mono opacity-60">
+                             {timeAgo(onu.status_changed_at)}
+                          </td>
+                          <td className="px-6 py-4 text-[10px] font-mono">
+                             {onu.upload_speed && onu.upload_speed !== 'Unknown' ? (
+                               <span className="flex flex-col">
+                                 <span className="text-emerald-600">UP: {onu.upload_speed}</span>
+                                 <span className="text-blue-600">DN: {onu.download_speed}</span>
+                               </span>
+                             ) : (
+                               <span className="opacity-30 italic">Enriqueciendo...</span>
+                             )}
                           </td>
                           <td className="px-6 py-4 font-mono text-xs">{signal}</td>
                           <td className="px-6 py-4 font-mono text-xs">{distance}</td>
@@ -550,7 +583,7 @@ export default function App() {
           );
         })()}
         
-        {/* PON Outages Section */}
+        {/* PON Status Section */}
         {(() => {
           const allPortsStatus = ponOutages;
           const filteredPonStatus = allPortsStatus.filter(p => {
@@ -673,7 +706,6 @@ export default function App() {
                   {portsToShow.slice((outagePage - 1) * 10, outagePage * 10).map((p, i) => {
                     const portKey = `${p.olt_id}-${p.board}-${p.port}`;
                     const isExpanded = expandedPort === portKey;
-                    const affectedOnusList = onus.filter(o => o.olt_id === p.olt_id && o.board === p.board && o.port === p.port);
                     
                     return (
                       <React.Fragment key={i}>
