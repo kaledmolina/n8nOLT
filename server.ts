@@ -66,6 +66,13 @@ async function initDB() {
     await db.run("UPDATE onus SET status_changed_at = CURRENT_TIMESTAMP WHERE status_changed_at IS NULL");
   }
 
+  // PRAGMA for port_alerts migrations
+  const portAlertCols = await db.all("PRAGMA table_info(port_alerts)");
+  const portAlertColNames = portAlertCols.map((c: any) => c.name);
+  if (!portAlertColNames.includes('consecutive_healthy')) {
+    await db.exec("ALTER TABLE port_alerts ADD COLUMN consecutive_healthy INTEGER DEFAULT 0");
+  }
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS sync_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +94,7 @@ async function initDB() {
       port_key TEXT PRIMARY KEY,
       last_percentage INTEGER,
       status TEXT,
+      consecutive_healthy INTEGER DEFAULT 0,
       last_notified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -130,6 +138,7 @@ async function getOnusWithStatus() {
   let statusMap = new Map();
   let adminStatusMap = new Map();
 
+  let apiSuccess = false;
   try {
     // Fetch running statuses
     console.log("[API] Fetching live statuses from SmartOLT...");
@@ -160,6 +169,8 @@ async function getOnusWithStatus() {
       if (sn) statusMap.set(sn, s.status || s.onu_status || s.phase_state || s.state || s.run_state);
     });
 
+    if (statusMap.size > 0 || rawStatuses.length > 0) apiSuccess = true;
+
     // Also fetch administrative statuses
     console.log("[API] Fetching administrative statuses from SmartOLT...");
     const adminRes = await axios.get(`https://${TARGET_HOST}/api/onu/get_onus_administrative_statuses`, axiosConfig);
@@ -184,11 +195,12 @@ async function getOnusWithStatus() {
     return {
       ...o,
       status: liveStatus || o.status || "Unknown",
-      admin_status: adminStatus || "Unknown"
+      admin_status: adminStatus || "Unknown",
+      is_live: !!liveStatus
     };
   });
 
-  return merged;
+  return { merged, apiSuccess };
 }
 
 // Background enrichment task for Speed Profiles
@@ -278,7 +290,7 @@ async function startServer() {
   });
 
   app.post("/api/logout", (req, res) => {
-    req.session.destroy((err: any) => {
+    (req.session as any).destroy((err: any) => {
       if (err) return res.status(500).json({ error: "Could not log out" });
       res.clearCookie('connect.sid');
       res.json({ success: true });
@@ -411,7 +423,7 @@ async function startServer() {
   // Local API - Get ONUs (Protected)
   app.get("/api/local/onus", requireAuth, async (req, res) => {
     try {
-      const merged = await getOnusWithStatus();
+      const { merged } = await getOnusWithStatus();
       res.json(merged);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -503,7 +515,7 @@ async function startServer() {
       const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
       const threshold = parseInt(thresholdRow?.value || '7');
 
-      const onus = await getOnusWithStatus();
+      const { merged: onus } = await getOnusWithStatus();
 
       const portMap = new Map();
       onus.forEach((o: any) => {
@@ -556,7 +568,11 @@ async function startServer() {
       const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
       const threshold = parseInt(thresholdRow?.value || '7');
 
-      const onus = await getOnusWithStatus();
+      const { merged: onus, apiSuccess } = await getOnusWithStatus();
+      if (!apiSuccess) {
+        console.warn("[CRON] Skipping check because live status API failed or returned 0 items.");
+        return;
+      }
 
       const portMap = new Map();
       onus.forEach((o: any) => {
@@ -575,49 +591,67 @@ async function startServer() {
         }
       });
 
-      const currentFallen = Array.from(portMap.values())
-        .filter(p => p.total > threshold && (p.los / p.total) >= 0.35)
-        .map(p => ({
-          key: `${p.olt_id}-${p.board}-${p.port}`,
-          olt_id: p.olt_id,
-          board: p.board,
-          port: p.port,
-          total: p.total,
-          los: p.los,
-          percentage: Math.round((p.los / p.total) * 100),
-          barrios: Array.from(p.barrios).slice(0, 5),
-          zonas: Array.from(p.zonas).slice(0, 5)
-        }));
+      // UMBRALES HISTERESIS: 35% para alerta, 15% para dar por recuperado (con persistencia)
+      const currentStatusMap = new Map(Array.from(portMap.values()).map(p => {
+        const percentage = Math.round((p.los / p.total) * 100);
+        return [`${p.olt_id}-${p.board}-${p.port}`, { ...p, percentage }];
+      }));
 
-      const previousAlerts = await db.all("SELECT * FROM port_alerts WHERE status = 'FALLEN'");
+      const previousAlerts = await db.all("SELECT * FROM port_alerts"); // Todos para manejar estados
       const previousMap = new Map(previousAlerts.map(a => [a.port_key, a]));
 
-      const newAlerts = currentFallen.filter(p => !previousMap.has(p.key));
-      const recoveredKeys = previousAlerts
-        .filter(a => !currentFallen.some(p => p.key === a.port_key))
-        .map(a => a.port_key);
+      const triggerAlertKeys: string[] = [];
+      const triggerRecoveryKeys: string[] = [];
 
-      if (newAlerts.length > 0) {
-        console.log(`[CRON] Detected ${newAlerts.length} NEW fallen ports. Sending ALERT to n8n...`);
-        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: currentFallen });
-        for (const p of newAlerts) {
-          await db.run(
-            "INSERT INTO port_alerts (port_key, last_percentage, status, last_notified) VALUES (?, ?, 'FALLEN', CURRENT_TIMESTAMP) ON CONFLICT(port_key) DO UPDATE SET status='FALLEN', last_percentage=excluded.last_percentage, last_notified=CURRENT_TIMESTAMP",
-            [p.key, p.percentage]
-          );
+      for (const [key, p] of currentStatusMap.entries()) {
+        const prev = previousMap.get(key) as any;
+        const isFallenNow = (p as any).total > threshold && (p as any).percentage >= 35;
+        const isHealthyNow = (p as any).percentage < 15;
+
+        if (isFallenNow) {
+          // Si estaba recuperado o era nuevo, lanzar alerta
+          if (!prev || prev.status !== 'FALLEN') {
+            triggerAlertKeys.push(key);
+            await db.run(
+              "INSERT INTO port_alerts (port_key, last_percentage, status, consecutive_healthy, last_notified) VALUES (?, ?, 'FALLEN', 0, CURRENT_TIMESTAMP) ON CONFLICT(port_key) DO UPDATE SET status='FALLEN', consecutive_healthy=0, last_percentage=excluded.last_percentage, last_notified=CURRENT_TIMESTAMP",
+              [key, p.percentage]
+            );
+          } else {
+            // Ya estaba en alerta, solo resetear contador salud por si acaso
+            await db.run("UPDATE port_alerts SET consecutive_healthy = 0, last_percentage = ? WHERE port_key = ?", [p.percentage, key]);
+          }
+        } else if (prev && prev.status === 'FALLEN' && isHealthyNow) {
+          // Proceso de recuperación con persistencia (3 ciclos)
+          const newCount = (prev.consecutive_healthy || 0) + 1;
+          if (newCount >= 3) {
+            triggerRecoveryKeys.push(key);
+            await db.run("UPDATE port_alerts SET status = 'RECOVERED', consecutive_healthy = ?, last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [newCount, key]);
+          } else {
+            console.log(`[CRON] Port ${key} is healthy (${p.percentage}%) but needs ${3 - newCount} more cycles for recovery.`);
+            await db.run("UPDATE port_alerts SET consecutive_healthy = ? WHERE port_key = ?", [newCount, key]);
+          }
+        } else if (prev && prev.status === 'FALLEN' && !isHealthyNow) {
+          // Está entre 15% y 35%, resetear contador pero seguir en FALLEN
+          await db.run("UPDATE port_alerts SET consecutive_healthy = 0 WHERE port_key = ?", [key]);
         }
       }
 
-      if (recoveredKeys.length > 0) {
-        console.log(`[CRON] Detected ${recoveredKeys.length} RECOVERED ports. Sending RECOVERY to n8n...`);
-        const recoveredData = previousAlerts.filter(a => recoveredKeys.includes(a.port_key)).map(a => {
-          const [olt_id, board, port] = a.port_key.split('-');
-          return { olt_id, board, port, key: a.port_key };
+      // Detectar puertos que ya no están en el reporte (tal vez borrados o movidos) - tratarlos como recuperados si estaban alerta?
+      // Por simplicidad, el loop anterior cubre lo que está actualmente en el mapa.
+
+      if (triggerAlertKeys.length > 0) {
+        console.log(`[CRON] Detected ${triggerAlertKeys.length} NEW fallen ports. Sending ALERT to n8n...`);
+        const alertData = triggerAlertKeys.map(k => currentStatusMap.get(k));
+        await axios.post(N8N_WEBHOOK_URL, { type: 'ALERT', ports: alertData });
+      }
+
+      if (triggerRecoveryKeys.length > 0) {
+        console.log(`[CRON] Detected ${triggerRecoveryKeys.length} RECOVERED ports. Sending RECOVERY to n8n...`);
+        const recoveredData = triggerRecoveryKeys.map(k => {
+          const [olt_id, board, port] = k.split('-');
+          return { olt_id, board, port, key: k };
         });
         await axios.post(N8N_WEBHOOK_URL, { type: 'RECOVERY', ports: recoveredData });
-        for (const key of recoveredKeys) {
-          await db.run("UPDATE port_alerts SET status = 'RECOVERED', last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [key]);
-        }
       }
 
       // --- SPECIAL ONUS MONITORING ---
