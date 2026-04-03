@@ -578,26 +578,33 @@ async function startServer() {
       onus.forEach((o: any) => {
         const key = `${o.olt_id}-${o.board}-${o.port}`;
         if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, barrios: new Set(), zonas: new Set() });
+          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, totalFailures: 0, barrios: new Set(), zonas: new Set() });
         }
         const p = portMap.get(key);
         p.total++;
-        if (o.status?.toLowerCase() === 'los') {
+        const status = (o.status || "").toLowerCase();
+        if (status === 'los') {
           p.los++;
+          p.totalFailures++;
           const barrio = (o.address || o.comment || "").trim();
           if (barrio) p.barrios.add(barrio);
           const zona = (o.zone_name || "").trim();
           if (zona) p.zonas.add(zona);
+        } else if (status === 'power fail' || status === 'offline' || status === 'dying gasp') {
+          p.totalFailures++;
         }
       });
 
-      // UMBRALES HISTERESIS: 35% para alerta, 15% para dar por recuperado (con persistencia)
+      // UMBRALES HISTERESIS Y SEPARACION LOGICA:
+      // Alerta: solo LOS >= 35%.
+      // Recuperación: solo si FALLO TOTAL (LOS + Power + Offline) < 15%.
       const currentStatusMap = new Map(Array.from(portMap.values()).map(p => {
-        const percentage = Math.round((p.los / p.total) * 100);
-        return [`${p.olt_id}-${p.board}-${p.port}`, { ...p, percentage }];
+        const losPercentage = Math.round((p.los / p.total) * 100);
+        const totalFailurePercentage = Math.round((p.totalFailures / p.total) * 100);
+        return [`${p.olt_id}-${p.board}-${p.port}`, { ...p, losPercentage, totalFailurePercentage }];
       }));
 
-      const previousAlerts = await db.all("SELECT * FROM port_alerts"); // Todos para manejar estados
+      const previousAlerts = await db.all("SELECT * FROM port_alerts");
       const previousMap = new Map(previousAlerts.map(a => [a.port_key, a]));
 
       const triggerAlertKeys: string[] = [];
@@ -605,34 +612,37 @@ async function startServer() {
 
       for (const [key, p] of currentStatusMap.entries()) {
         const prev = previousMap.get(key) as any;
-        const isFallenNow = (p as any).total > threshold && (p as any).percentage >= 35;
-        const isHealthyNow = (p as any).percentage < 15;
+        const isFallenNowByFiber = p.total > threshold && (p as any).losPercentage >= 35;
+        const isHealthyNowByTotal = (p as any).totalFailurePercentage < 15;
 
-        if (isFallenNow) {
+        if (isFallenNowByFiber) {
           // Si estaba recuperado o era nuevo, lanzar alerta
           if (!prev || prev.status !== 'FALLEN') {
             triggerAlertKeys.push(key);
             await db.run(
               "INSERT INTO port_alerts (port_key, last_percentage, status, consecutive_healthy, last_notified) VALUES (?, ?, 'FALLEN', 0, CURRENT_TIMESTAMP) ON CONFLICT(port_key) DO UPDATE SET status='FALLEN', consecutive_healthy=0, last_percentage=excluded.last_percentage, last_notified=CURRENT_TIMESTAMP",
-              [key, p.percentage]
+              [key, (p as any).losPercentage]
             );
           } else {
-            // Ya estaba en alerta, solo resetear contador salud por si acaso
-            await db.run("UPDATE port_alerts SET consecutive_healthy = 0, last_percentage = ? WHERE port_key = ?", [p.percentage, key]);
+            // Ya estaba en alerta, resetear contador salud y actualizar porcentaje de fibra
+            await db.run("UPDATE port_alerts SET consecutive_healthy = 0, last_percentage = ? WHERE port_key = ?", [(p as any).losPercentage, key]);
           }
-        } else if (prev && prev.status === 'FALLEN' && isHealthyNow) {
+        } else if (prev && prev.status === 'FALLEN' && isHealthyNowByTotal) {
           // Proceso de recuperación con persistencia (3 ciclos)
           const newCount = (prev.consecutive_healthy || 0) + 1;
           if (newCount >= 3) {
             triggerRecoveryKeys.push(key);
             await db.run("UPDATE port_alerts SET status = 'RECOVERED', consecutive_healthy = ?, last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [newCount, key]);
           } else {
-            console.log(`[CRON] Port ${key} is healthy (${p.percentage}%) but needs ${3 - newCount} more cycles for recovery.`);
+            console.log(`[CRON] Port ${key} is total healthy (${(p as any).totalFailurePercentage}%) but needs ${3 - newCount} more cycles for recovery.`);
             await db.run("UPDATE port_alerts SET consecutive_healthy = ? WHERE port_key = ?", [newCount, key]);
           }
-        } else if (prev && prev.status === 'FALLEN' && !isHealthyNow) {
-          // Está entre 15% y 35%, resetear contador pero seguir en FALLEN
-          await db.run("UPDATE port_alerts SET consecutive_healthy = 0 WHERE port_key = ?", [key]);
+        } else if (prev && prev.status === 'FALLEN' && !isHealthyNowByTotal) {
+          // El corte de fibra ya no es > 35%, PERO sigue habiendo corte de luz u otros fallos (Fallo Total >= 15%)
+          // Resetear contador para evitar recuperaciones falsas durante el corte de luz
+          if (prev.consecutive_healthy !== 0) {
+            await db.run("UPDATE port_alerts SET consecutive_healthy = 0 WHERE port_key = ?", [key]);
+          }
         }
       }
 
