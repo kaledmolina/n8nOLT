@@ -700,14 +700,17 @@ async function startServer() {
       if (triggerRecoveryKeys.length > 0) {
         console.log(`[CRON] Detected ${triggerRecoveryKeys.length} RECOVERED ports. Sending RECOVERY to n8n...`);
         const recoveredData = triggerRecoveryKeys.map(k => {
-          const [olt_id, board, port] = k.split('-');
+          const current = currentStatusMap.get(k) as any;
           return { 
-            olt_id, 
-            board, 
-            port, 
             key: k,
-            olt_name: OLT_NAMES[olt_id] || `OLT ${olt_id}`,
-            formatted_location: `Tarjeta ${board} / Puerto ${port}`
+            olt_id: current.olt_id,
+            olt_name: current.olt_name,
+            board: current.board,
+            port: current.port,
+            formatted_location: current.formatted_location,
+            total_onus: current.total,
+            restored_count: current.total - current.totalFailures,
+            barrios: current.barrios
           };
         });
         await axios.post(N8N_WEBHOOK_URL, { type: 'RECOVERY', ports: recoveredData });
