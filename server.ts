@@ -600,10 +600,13 @@ async function startServer() {
         const p = portMap.get(key);
         p.total++;
         const status = (o.status || "").toLowerCase();
+        const isLive = !!o.is_live;
         
         // Capture location info for all ONUs on this port that are down
-        const isDown = status === 'los' || status === 'power fail' || status === 'offline' || status === 'dying gasp';
-        if (isDown) {
+        // If not live, it counts as a failure to prevent false recovery
+        const isFailure = status === 'los' || status === 'power fail' || status === 'offline' || status === 'dying gasp' || !isLive;
+
+        if (isFailure) {
           const barrio = (o.address || o.comment || "").trim();
           if (barrio) p.barrios.add(barrio);
           const zona = (o.zone_name || "").trim();
@@ -619,6 +622,9 @@ async function startServer() {
           p.powerFail++;
           p.totalFailures++;
         } else if (status === 'offline') {
+          p.totalFailures++;
+        } else if (!isLive) {
+          // ONU NOT in live result - count as failure for stable recovery
           p.totalFailures++;
         }
       });
@@ -738,15 +744,22 @@ async function startServer() {
            let type = "SPECIAL_ALERT";
 
            if (currentStatus === "online") {
-              // Recovery with stability check (3 cycles)
-              const newStableCount = (spec.consecutive_stable || 0) + 1;
-              if (newStableCount >= 3) {
-                 shouldAlert = true;
-                 type = "SPECIAL_RECOVERY";
-                 await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP, consecutive_stable = 0 WHERE sn = ?", [currentStatus, spec.sn]);
+              // Recovery with stability check (3 cycles) - ONLY if it's live data
+              if (currentOnu.is_live) {
+                 const newStableCount = (spec.consecutive_stable || 0) + 1;
+                 if (newStableCount >= 3) {
+                    shouldAlert = true;
+                    type = "SPECIAL_RECOVERY";
+                    await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP, consecutive_stable = 0 WHERE sn = ?", [currentStatus, spec.sn]);
+                 } else {
+                    console.log(`[CRON] Special ONU ${spec.sn} is online but needs ${3 - newStableCount} more cycles for recovery.`);
+                    await db.run("UPDATE special_onus SET consecutive_stable = ? WHERE sn = ?", [newStableCount, spec.sn]);
+                 }
               } else {
-                 console.log(`[CRON] Special ONU ${spec.sn} is online but needs ${3 - newStableCount} more cycles for recovery.`);
-                 await db.run("UPDATE special_onus SET consecutive_stable = ? WHERE sn = ?", [newStableCount, spec.sn]);
+                 // Not live, ignore this "online" status for stability
+                 if (spec.consecutive_stable !== 0) {
+                    await db.run("UPDATE special_onus SET consecutive_stable = 0 WHERE sn = ?", [spec.sn]);
+                 }
               }
            } else {
               // Failure alert is instant
