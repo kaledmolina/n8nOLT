@@ -755,7 +755,8 @@ async function startServer() {
                   port: currentOnu.port,
                   formatted_location: `Tarjeta ${currentOnu.board} / Puerto ${currentOnu.port}`,
                   zone: currentOnu.zone_name || currentOnu.zone_id,
-                  barrio: (currentOnu.address || currentOnu.comment || "").trim()
+                  barrio: (currentOnu.address || currentOnu.comment || "").trim(),
+                  possible_cause: (currentOnu.status || "").toLowerCase() === 'los' ? 'Corte de fibra' : ((currentOnu.status || "").toLowerCase() === 'power fail' ? 'Corte eléctrico' : 'Otro')
                 }
               });
               await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP WHERE sn = ?", [currentStatus, spec.sn]);
