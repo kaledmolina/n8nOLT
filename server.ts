@@ -750,9 +750,12 @@ async function startServer() {
                   name: currentOnu.name,
                   status: currentOnu.status,
                   olt_id: currentOnu.olt_id,
+                  olt_name: OLT_NAMES[currentOnu.olt_id] || `OLT ${currentOnu.olt_id}`,
                   board: currentOnu.board,
                   port: currentOnu.port,
-                  zone: currentOnu.zone_name || currentOnu.zone_id
+                  formatted_location: `Tarjeta ${currentOnu.board} / Puerto ${currentOnu.port}`,
+                  zone: currentOnu.zone_name || currentOnu.zone_id,
+                  barrio: (currentOnu.address || currentOnu.comment || "").trim()
                 }
               });
               await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP WHERE sn = ?", [currentStatus, spec.sn]);
