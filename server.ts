@@ -16,6 +16,16 @@ const API_KEY = process.env.SMARTOLT_API_KEY || "3332756bd57545ba99a55b54fa666c1
 const TARGET_HOST = process.env.SMARTOLT_TARGET_HOST || "intalnet.vortex-m2.com";
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || "https://n8n.intalnet.com/webhook/smartolt-report";
 
+const OLT_NAMES: Record<string, string> = {
+  "6": "OLT TIERRALTA",
+  "7": "OLT MONTERIA",
+  "9": "OLT-SANPEDRO",
+  "10": "VALENCIA",
+  "11": "PUERTO LIBERTADOR",
+  "12": "OLT MONTERIA 2",
+  "13": "TIERRALTA 9 DE AGOSTO"
+};
+
 let db: any;
 
 async function initDB() {
@@ -578,30 +588,61 @@ async function startServer() {
       onus.forEach((o: any) => {
         const key = `${o.olt_id}-${o.board}-${o.port}`;
         if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, totalFailures: 0, barrios: new Set(), zonas: new Set() });
+          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, powerFail: 0, totalFailures: 0, barrios: new Set(), zonas: new Set(), addresses: new Set() });
         }
         const p = portMap.get(key);
         p.total++;
         const status = (o.status || "").toLowerCase();
-        if (status === 'los') {
-          p.los++;
-          p.totalFailures++;
+        
+        // Capture location info for all ONUs on this port that are down
+        const isDown = status === 'los' || status === 'power fail' || status === 'offline' || status === 'dying gasp';
+        if (isDown) {
           const barrio = (o.address || o.comment || "").trim();
           if (barrio) p.barrios.add(barrio);
           const zona = (o.zone_name || "").trim();
           if (zona) p.zonas.add(zona);
-        } else if (status === 'power fail' || status === 'offline' || status === 'dying gasp') {
+          const addr = (o.address || o.comment || "").trim();
+          if (addr) p.addresses.add(addr);
+        }
+
+        if (status === 'los') {
+          p.los++;
+          p.totalFailures++;
+        } else if (status === 'power fail' || status === 'dying gasp') {
+          p.powerFail++;
+          p.totalFailures++;
+        } else if (status === 'offline') {
           p.totalFailures++;
         }
       });
 
       // UMBRALES HISTERESIS Y SEPARACION LOGICA:
       // Alerta: solo LOS >= 35%.
-      // Recuperación: solo si FALLO TOTAL (LOS + Power + Offline) < 15%.
       const currentStatusMap = new Map(Array.from(portMap.values()).map(p => {
         const losPercentage = Math.round((p.los / p.total) * 100);
         const totalFailurePercentage = Math.round((p.totalFailures / p.total) * 100);
-        return [`${p.olt_id}-${p.board}-${p.port}`, { ...p, losPercentage, totalFailurePercentage }];
+        const oltName = OLT_NAMES[p.olt_id] || `OLT ${p.olt_id}`;
+        
+        // Diagnóstico: si hay más powerfail que LOS -> Corte eléctrico, sino Corte de fibra
+        let possibleCause = "Indeterminado";
+        if (p.powerFail > p.los) {
+          possibleCause = "Corte eléctrico";
+        } else if (p.los > 0) {
+          possibleCause = "Corte de fibra";
+        }
+
+        return [`${p.olt_id}-${p.board}-${p.port}`, { 
+          ...p, 
+          olt_name: oltName,
+          possible_cause: possibleCause,
+          los_count: p.los,
+          total_onus: p.total,
+          losPercentage, 
+          totalFailurePercentage,
+          barrios: Array.from(p.barrios).slice(0, 10),
+          zonas: Array.from(p.zonas).slice(0, 5),
+          addresses: Array.from(p.addresses).slice(0, 5)
+        }];
       }));
 
       const previousAlerts = await db.all("SELECT * FROM port_alerts");
