@@ -595,7 +595,7 @@ async function startServer() {
       onus.forEach((o: any) => {
         const key = `${o.olt_id}-${o.board}-${o.port}`;
         if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, powerFail: 0, totalFailures: 0, barrios: new Set(), zonas: new Set(), addresses: new Set() });
+          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, powerFail: 0, totalFailures: 0, barrios: new Set(), zonas: new Set(), addresses: new Set(), clientNames: new Set() });
         }
         const p = portMap.get(key);
         p.total++;
@@ -611,6 +611,8 @@ async function startServer() {
           if (barrio) p.barrios.add(barrio);
           const zona = (o.zone_name || "").trim();
           if (zona) p.zonas.add(zona);
+          const cliente = (o.name || "").trim();
+          if (cliente) p.clientNames.add(cliente);
           const addr = (o.address || o.comment || "").trim();
           if (addr) p.addresses.add(addr);
         }
@@ -654,8 +656,9 @@ async function startServer() {
           losPercentage, 
           totalFailurePercentage,
           barrios: Array.from(p.barrios).slice(0, 10),
-          zonas: Array.from(p.zonas).slice(0, 5),
-          addresses: Array.from(p.addresses).slice(0, 5)
+          zonas: Array.from(p.zonas).slice(0, 10),
+          clientNames: Array.from(p.clientNames).slice(0, 10),
+          addresses: Array.from(p.addresses).slice(0, 10)
         }];
       }));
 
