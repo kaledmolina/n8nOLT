@@ -637,6 +637,7 @@ async function startServer() {
           possible_cause: possibleCause,
           los_count: p.los,
           total_onus: p.total,
+          formatted_location: `Tarjeta ${p.board} / Puerto ${p.port}`,
           losPercentage, 
           totalFailurePercentage,
           barrios: Array.from(p.barrios).slice(0, 10),
