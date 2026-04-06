@@ -117,9 +117,16 @@ async function initDB() {
       alert_on_power_fail INTEGER DEFAULT 1,
       alert_on_offline INTEGER DEFAULT 0,
       last_status TEXT,
-      last_notified DATETIME DEFAULT CURRENT_TIMESTAMP
+      last_notified DATETIME DEFAULT CURRENT_TIMESTAMP,
+      consecutive_stable INTEGER DEFAULT 0
     )
   `);
+
+  try {
+    await db.exec("ALTER TABLE special_onus ADD COLUMN consecutive_stable INTEGER DEFAULT 0");
+  } catch (e) {
+    // Column already exists, ignore
+  }
 
   // Set default threshold if not exists
   await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('FALLEN_PORT_THRESHOLD', '7')");
@@ -730,15 +737,31 @@ async function startServer() {
            let shouldAlert = false;
            let type = "SPECIAL_ALERT";
 
-           if (currentStatus === "online" && lastStatus !== "online") {
-              shouldAlert = true;
-              type = "SPECIAL_RECOVERY";
-           } else if (currentStatus === "los" && spec.alert_on_los) {
-              shouldAlert = true;
-           } else if (currentStatus === "power fail" && spec.alert_on_power_fail) {
-              shouldAlert = true;
-           } else if (currentStatus === "offline" && spec.alert_on_offline) {
-              shouldAlert = true;
+           if (currentStatus === "online") {
+              // Recovery with stability check (3 cycles)
+              const newStableCount = (spec.consecutive_stable || 0) + 1;
+              if (newStableCount >= 3) {
+                 shouldAlert = true;
+                 type = "SPECIAL_RECOVERY";
+                 await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP, consecutive_stable = 0 WHERE sn = ?", [currentStatus, spec.sn]);
+              } else {
+                 console.log(`[CRON] Special ONU ${spec.sn} is online but needs ${3 - newStableCount} more cycles for recovery.`);
+                 await db.run("UPDATE special_onus SET consecutive_stable = ? WHERE sn = ?", [newStableCount, spec.sn]);
+              }
+           } else {
+              // Failure alert is instant
+              const isFailingNow = (currentStatus === "los" && spec.alert_on_los) ||
+                                   (currentStatus === "power fail" && spec.alert_on_power_fail) ||
+                                   (currentStatus === "offline" && spec.alert_on_offline);
+
+              if (isFailingNow) {
+                 shouldAlert = true;
+                 // No stability check for alerts, instant notify
+                 await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP, consecutive_stable = 0 WHERE sn = ?", [currentStatus, spec.sn]);
+              } else {
+                 // Important status change but not configured to alert, still update DB
+                 await db.run("UPDATE special_onus SET last_status = ?, consecutive_stable = 0 WHERE sn = ?", [currentStatus, spec.sn]);
+              }
            }
 
            if (shouldAlert) {
@@ -759,7 +782,11 @@ async function startServer() {
                   possible_cause: (currentOnu.status || "").toLowerCase() === 'los' ? 'Corte de fibra' : ((currentOnu.status || "").toLowerCase() === 'power fail' ? 'Corte eléctrico' : 'Otro')
                 }
               });
-              await db.run("UPDATE special_onus SET last_status = ?, last_notified = CURRENT_TIMESTAMP WHERE sn = ?", [currentStatus, spec.sn]);
+           }
+        } else {
+           // Status is same as last notified status, reset stable counter if it was pending
+           if (spec.consecutive_stable !== 0) {
+              await db.run("UPDATE special_onus SET consecutive_stable = 0 WHERE sn = ?", [spec.sn]);
            }
         }
       }
