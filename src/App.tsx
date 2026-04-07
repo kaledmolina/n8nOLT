@@ -265,45 +265,11 @@ export default function App() {
       const dbRes = await axios.get('/api/local/onus');
       const combinedOnus = Array.isArray(dbRes.data) ? dbRes.data : [];
       setOnus(combinedOnus);
-      // Calculate PON Outages based on > 50% offline threshold
-      const portMap = new Map();
-      const portTotals = new Map<string, number>();
-      
-      // Pre-calculate totals per port
-      combinedOnus.forEach(o => {
-        const key = `${o.olt_id}-${o.board}-${o.port}`;
-        portTotals.set(key, (portTotals.get(key) || 0) + 1);
-      });
 
-      combinedOnus.forEach(o => {
-        const key = `${o.olt_id}-${o.board}-${o.port}`;
-        if (!portMap.has(key)) {
-          portMap.set(key, {
-            olt_id: o.olt_id,
-            board: o.board,
-            port: o.port,
-            total_onus: portTotals.get(key) || 0,
-            los: 0,
-            power: 0,
-            cause: "Unknown",
-            since: "Just now" // Placeholder as SmartOLT doesn't always provide this in bulk
-          });
-        }
-        
-        const adminStatus = o.admin_status?.toLowerCase();
-        if (adminStatus !== 'disabled') {
-          const status = o.status?.toLowerCase() || "";
-          const portData = portMap.get(key);
-          if (status === "los") portData.los += 1;
-          if (status === "power fail") portData.power += 1;
-        }
-      });
+      // Fetch intelligent outages from server instead of calculating on client
+      const fallenRes = await axios.get('/api/local/fallen-ports');
+      setPonOutages(Array.isArray(fallenRes.data) ? fallenRes.data : []);
       
-      Array.from(portMap.values()).forEach(p => {
-        p.cause = "LOS"; // Fallback cause for the table
-      });
-      
-      setPonOutages(Array.from(portMap.values()));
       setLastUpdated(new Date());
 
     } catch (err: any) {
@@ -743,8 +709,8 @@ export default function App() {
 
         {/* Stats Summary */}
         {(() => {
-          const totallyFallen = ponOutages.filter(p => p.total_onus > onusThreshold && (p.los / p.total_onus) >= 0.35);
-          const totalPorts = ponOutages.length;
+          const totallyFallen = ponOutages;
+          const totalPorts = (onus?.length || 0) / 64; // Approximation
 
           return (
             <div className="grid grid-cols-1 md:grid-cols-4 gap-px bg-[#141414] border border-[#141414] mb-8">
@@ -770,13 +736,18 @@ export default function App() {
                     {totallyFallen.map((p, i) => {
                       const portKey = `${p.olt_id}-${p.board}-${p.port}`;
                       return (
-                        <span 
+                        <div 
                           key={i} 
-                          className="text-xs font-mono font-bold text-rose-500 whitespace-nowrap cursor-pointer hover:underline"
+                          className="flex flex-col gap-1 p-2 bg-rose-50 border border-rose-100 rounded-sm cursor-pointer hover:bg-rose-100 transition-colors"
                           onClick={() => setExpandedPort(portKey)}
                         >
-                          {getOltName(p.olt_id)} - B{p.board} - P{p.port}
-                        </span>
+                          <span className="text-xs font-mono font-bold text-rose-600">
+                             {p.olt_name || `OLT ${p.olt_id}`} - {p.formatted_location}
+                          </span>
+                          <span className="text-[9px] uppercase font-bold tracking-widest text-rose-400">
+                             {p.possible_cause} — {p.los_count}/{p.total_onus} ONUs
+                          </span>
+                        </div>
                       );
                     })}
                   </div>
@@ -872,6 +843,7 @@ export default function App() {
                     <tr className="text-[9px] uppercase font-bold opacity-40 border-b border-[#141414]/5">
                       <th className="px-6 py-3">Nombre / SN</th>
                       <th className="px-6 py-3">Estado Actual</th>
+                      <th className="px-6 py-3">Estabilidad</th>
                       <th className="px-6 py-3">Reglas</th>
                       <th className="px-6 py-3 text-right">Acción</th>
                     </tr>
@@ -894,6 +866,17 @@ export default function App() {
                               <span className="font-mono uppercase text-[10px] font-bold">
                                 {cached?.status || "Unknown"}
                               </span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-2">
+                               <div className="flex-1 h-1 bg-slate-100 rounded-full overflow-hidden w-12">
+                                  <div 
+                                    className="h-full bg-emerald-500 transition-all duration-500" 
+                                    style={{ width: `${((s.consecutive_stable || 0) / 3) * 100}%` }}
+                                  />
+                               </div>
+                               <span className="text-[9px] font-mono opacity-40">{s.consecutive_stable || 0}/3</span>
                             </div>
                           </td>
                           <td className="px-6 py-4">
@@ -1049,7 +1032,9 @@ export default function App() {
                     return (
                       <React.Fragment key={i}>
                         <tr className={cn("transition-colors", isExpanded ? "bg-[#141414]/5" : "hover:bg-[#141414]/5")}>
-                          <td className="px-6 py-5 font-bold text-sm">{getOltName(p.olt_id)}</td>
+                          <td className="px-6 py-5 font-bold text-sm">
+                            {p.olt_name || getOltName(p.olt_id)}
+                          </td>
                           <td className="px-6 py-5">
                             <span 
                               className="text-blue-600 underline font-mono text-sm cursor-pointer hover:text-blue-800"
@@ -1067,17 +1052,20 @@ export default function App() {
                             <span className="text-[#141414]/40 font-normal text-xs"> of {p.total_onus}</span>
                           </td>
                           <td className="px-6 py-5">
-                            {p.los > 0 ? (
-                              <span className="px-3 py-1 bg-rose-500/10 text-rose-500 text-[10px] font-bold uppercase tracking-wider rounded-full border border-rose-500/20">
-                                {p.cause}
+                            {(p.losPercentage || 0) > 0 ? (
+                              <span className={cn(
+                                "px-3 py-1 text-[10px] font-bold uppercase tracking-wider rounded-full border",
+                                p.possible_cause === "Corte eléctrico" ? "bg-amber-500/10 text-amber-500 border-amber-500/20" : "bg-rose-500/10 text-rose-500 border-rose-500/20"
+                              )}>
+                                {p.possible_cause || "Desconocido"}
                               </span>
                             ) : (
                               <span className="px-3 py-1 bg-emerald-500/10 text-emerald-500 text-[10px] font-bold uppercase tracking-wider rounded-full border border-emerald-500/20">
-                                Operational
+                                Operativo
                               </span>
                             )}
                           </td>
-                          <td className="px-6 py-5 text-xs opacity-60 font-mono">{p.los > 0 ? p.since : "Steady"}</td>
+                          <td className="px-6 py-5 text-xs opacity-60 font-mono">{(p.losPercentage || 0) > 0 ? "Activa" : "Normal"}</td>
                         </tr>
                       </React.Fragment>
                     );

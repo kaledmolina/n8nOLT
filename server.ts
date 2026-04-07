@@ -220,6 +220,86 @@ async function getOnusWithStatus() {
   return { merged, apiSuccess };
 }
 
+function calculatePortSummary(onus: any[]) {
+  const portMap = new Map();
+  onus.forEach((o: any) => {
+    const key = `${o.olt_id}-${o.board}-${o.port}`;
+    if (!portMap.has(key)) {
+      portMap.set(key, { 
+        olt_id: o.olt_id, 
+        board: o.board, 
+        port: o.port, 
+        total: 0, 
+        los: 0, 
+        powerFail: 0, 
+        totalFailures: 0, 
+        barrios: new Set(), 
+        zonas: new Set(), 
+        addresses: new Set(), 
+        clientNames: new Set() 
+      });
+    }
+    const p = portMap.get(key);
+    p.total++;
+    const status = (o.status || "").toLowerCase();
+    const isLive = !!o.is_live;
+    
+    const isFailure = status === 'los' || status === 'power fail' || status === 'offline' || status === 'dying gasp' || !isLive;
+
+    if (isFailure) {
+      const barrio = (o.address || o.comment || "").trim();
+      if (barrio) p.barrios.add(barrio);
+      
+      const zona = (o.zone_name || "").trim();
+      if (zona) p.zonas.add(zona);
+      
+      const cliente = (o.name || "").trim();
+      if (cliente) p.clientNames.add(cliente);
+
+      const addr = (o.address || o.comment || "").trim();
+      if (addr) p.addresses.add(addr);
+    }
+
+    if (status === 'los') {
+      p.los++;
+      p.totalFailures++;
+    } else if (status === 'power fail' || status === 'dying gasp') {
+      p.powerFail++;
+      p.totalFailures++;
+    } else if (status === 'offline' || !isLive) {
+      p.totalFailures++;
+    }
+  });
+
+  return new Map(Array.from(portMap.values()).map(p => {
+    const losPercentage = Math.round((p.los / p.total) * 100);
+    const totalFailurePercentage = Math.round((p.totalFailures / p.total) * 100);
+    const oltName = OLT_NAMES[p.olt_id] || `OLT ${p.olt_id}`;
+    
+    let possibleCause = "Indeterminado";
+    if (p.powerFail > p.los) {
+      possibleCause = "Corte eléctrico";
+    } else if (p.los > 0) {
+      possibleCause = "Corte de fibra";
+    }
+
+    return [`${p.olt_id}-${p.board}-${p.port}`, { 
+      ...p, 
+      olt_name: oltName,
+      possible_cause: possibleCause,
+      los_count: p.los,
+      total_onus: p.total,
+      formatted_location: `Tarjeta ${p.board} / Puerto ${p.port}`,
+      losPercentage, 
+      totalFailurePercentage,
+      barrios: Array.from(p.barrios).slice(0, 10),
+      zonas: Array.from(p.zonas).slice(0, 10),
+      clientNames: Array.from(p.clientNames).slice(0, 10),
+      addresses: Array.from(p.addresses).slice(0, 10)
+    }];
+  }));
+}
+
 // Background enrichment task for Speed Profiles
 async function enrichOnuSpeeds() {
   try {
@@ -533,24 +613,10 @@ async function startServer() {
       const threshold = parseInt(thresholdRow?.value || '7');
 
       const { merged: onus } = await getOnusWithStatus();
+      const portSummaryMap = calculatePortSummary(onus);
 
-      const portMap = new Map();
-      onus.forEach((o: any) => {
-        const key = `${o.olt_id}-${o.board}-${o.port}`;
-        if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0 });
-        }
-        const p = portMap.get(key);
-        p.total++;
-        if (o.status?.toLowerCase() === 'los') p.los++;
-      });
-
-      const fallen = Array.from(portMap.values())
-        .filter(p => p.total > threshold && (p.los / p.total) >= 0.35)
-        .map(p => ({
-          ...p,
-          percentage: Math.round((p.los / p.total) * 100)
-        }));
+      const fallen = Array.from(portSummaryMap.values())
+        .filter((p: any) => p.total > threshold && p.losPercentage >= 35);
 
       res.json(fallen);
     } catch (error: any) {
@@ -591,76 +657,7 @@ async function startServer() {
         return;
       }
 
-      const portMap = new Map();
-      onus.forEach((o: any) => {
-        const key = `${o.olt_id}-${o.board}-${o.port}`;
-        if (!portMap.has(key)) {
-          portMap.set(key, { olt_id: o.olt_id, board: o.board, port: o.port, total: 0, los: 0, powerFail: 0, totalFailures: 0, barrios: new Set(), zonas: new Set(), addresses: new Set(), clientNames: new Set() });
-        }
-        const p = portMap.get(key);
-        p.total++;
-        const status = (o.status || "").toLowerCase();
-        const isLive = !!o.is_live;
-        
-        // Capture location info for all ONUs on this port that are down
-        // If not live, it counts as a failure to prevent false recovery
-        const isFailure = status === 'los' || status === 'power fail' || status === 'offline' || status === 'dying gasp' || !isLive;
-
-        if (isFailure) {
-          const barrio = (o.address || o.comment || "").trim();
-          if (barrio) p.barrios.add(barrio);
-          const zona = (o.zone_name || "").trim();
-          if (zona) p.zonas.add(zona);
-          const cliente = (o.name || "").trim();
-          if (cliente) p.clientNames.add(cliente);
-          const addr = (o.address || o.comment || "").trim();
-          if (addr) p.addresses.add(addr);
-        }
-
-        if (status === 'los') {
-          p.los++;
-          p.totalFailures++;
-        } else if (status === 'power fail' || status === 'dying gasp') {
-          p.powerFail++;
-          p.totalFailures++;
-        } else if (status === 'offline') {
-          p.totalFailures++;
-        } else if (!isLive) {
-          // ONU NOT in live result - count as failure for stable recovery
-          p.totalFailures++;
-        }
-      });
-
-      // UMBRALES HISTERESIS Y SEPARACION LOGICA:
-      // Alerta: solo LOS >= 35%.
-      const currentStatusMap = new Map(Array.from(portMap.values()).map(p => {
-        const losPercentage = Math.round((p.los / p.total) * 100);
-        const totalFailurePercentage = Math.round((p.totalFailures / p.total) * 100);
-        const oltName = OLT_NAMES[p.olt_id] || `OLT ${p.olt_id}`;
-        
-        // Diagnóstico: si hay más powerfail que LOS -> Corte eléctrico, sino Corte de fibra
-        let possibleCause = "Indeterminado";
-        if (p.powerFail > p.los) {
-          possibleCause = "Corte eléctrico";
-        } else if (p.los > 0) {
-          possibleCause = "Corte de fibra";
-        }
-
-        return [`${p.olt_id}-${p.board}-${p.port}`, { 
-          ...p, 
-          olt_name: oltName,
-          possible_cause: possibleCause,
-          los_count: p.los,
-          total_onus: p.total,
-          formatted_location: `Tarjeta ${p.board} / Puerto ${p.port}`,
-          losPercentage, 
-          totalFailurePercentage,
-          barrios: Array.from(p.barrios).slice(0, 10),
-          zonas: Array.from(p.zonas).slice(0, 10),
-          clientNames: Array.from(p.clientNames).slice(0, 10),
-          addresses: Array.from(p.addresses).slice(0, 10)
-        }];
-      }));
+      const currentStatusMap = calculatePortSummary(onus);
 
       const previousAlerts = await db.all("SELECT * FROM port_alerts");
       const previousMap = new Map(previousAlerts.map(a => [a.port_key, a]));
