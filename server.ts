@@ -668,7 +668,8 @@ async function startServer() {
       for (const [key, p] of currentStatusMap.entries()) {
         const prev = previousMap.get(key) as any;
         const isFallenNowByFiber = p.total > threshold && (p as any).losPercentage >= 35;
-        const isHealthyNowByTotal = (p as any).totalFailurePercentage < 15;
+        const powerFailPct = Math.round(((p as any).powerFail / (p as any).total) * 100);
+        const isHealthyNow = (p as any).losPercentage < 35 && powerFailPct < 35;
 
         if (isFallenNowByFiber) {
           // Si estaba recuperado o era nuevo, lanzar alerta
@@ -682,19 +683,19 @@ async function startServer() {
             // Ya estaba en alerta, resetear contador salud y actualizar porcentaje de fibra
             await db.run("UPDATE port_alerts SET consecutive_healthy = 0, last_percentage = ? WHERE port_key = ?", [(p as any).losPercentage, key]);
           }
-        } else if (prev && prev.status === 'FALLEN' && isHealthyNowByTotal) {
+        } else if (prev && prev.status === 'FALLEN' && isHealthyNow) {
           // Proceso de recuperación con persistencia (3 ciclos)
           const newCount = (prev.consecutive_healthy || 0) + 1;
           if (newCount >= 3) {
             triggerRecoveryKeys.push(key);
             await db.run("UPDATE port_alerts SET status = 'RECOVERED', consecutive_healthy = ?, last_notified = CURRENT_TIMESTAMP WHERE port_key = ?", [newCount, key]);
           } else {
-            console.log(`[CRON] Port ${key} is total healthy (${(p as any).totalFailurePercentage}%) but needs ${3 - newCount} more cycles for recovery.`);
+            console.log(`[CRON] Port ${key} is total healthy (LOS: ${(p as any).losPercentage}%, PF: ${powerFailPct}%) but needs ${3 - newCount} more cycles for recovery.`);
             await db.run("UPDATE port_alerts SET consecutive_healthy = ? WHERE port_key = ?", [newCount, key]);
           }
-        } else if (prev && prev.status === 'FALLEN' && !isHealthyNowByTotal) {
-          // El corte de fibra ya no es > 35%, PERO sigue habiendo corte de luz u otros fallos (Fallo Total >= 15%)
-          // Resetear contador para evitar recuperaciones falsas durante el corte de luz
+        } else if (prev && prev.status === 'FALLEN' && !isHealthyNow) {
+          // El corte de fibra ya no es > 35%, PERO sigue habiendo corte de luz u otros fallos
+          // Resetear contador para evitar recuperaciones falsas durante el corte de luz o cortes menores
           if (prev.consecutive_healthy !== 0) {
             await db.run("UPDATE port_alerts SET consecutive_healthy = 0 WHERE port_key = ?", [key]);
           }
