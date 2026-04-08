@@ -709,7 +709,7 @@ export default function App() {
 
         {/* Stats Summary */}
         {(() => {
-          const totallyFallen = ponOutages;
+          const totallyFallen = ponOutages.filter(p => p.total > onusThreshold && (p.losPercentage || 0) >= 35);
           const totalPorts = (onus?.length || 0) / 64; // Approximation
 
           return (
@@ -1021,7 +1021,7 @@ export default function App() {
                     <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold opacity-40">Board/Port</th>
                     <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold opacity-40 text-center">Affected ONUs</th>
                     <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold opacity-40">Possible Cause</th>
-                    <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold opacity-40">Status Since</th>
+                    <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold opacity-40">Estabilidad / Ciclos</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#141414]/5">
@@ -1065,7 +1065,23 @@ export default function App() {
                               </span>
                             )}
                           </td>
-                          <td className="px-6 py-5 text-xs opacity-60 font-mono">{(p.losPercentage || 0) > 0 ? "Activa" : "Normal"}</td>
+                          <td className="px-6 py-5">
+                            {p.alert_status === 'FALLEN' ? (
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden w-12 border border-[#141414]/5 shadow-inner">
+                                  <div 
+                                    className={cn("h-full transition-all duration-500", (p.consecutive_healthy || 0) > 0 ? "bg-emerald-500" : "bg-rose-500")}
+                                    style={{ width: `${(Math.min(3, p.consecutive_healthy || 0) / 3) * 100}%` }}
+                                  />
+                                </div>
+                                <span className="text-[10px] font-mono opacity-80 font-bold">{p.consecutive_healthy || 0}/3</span>
+                              </div>
+                            ) : p.alert_status === 'RECOVERED' ? (
+                               <span className="text-xs font-mono text-emerald-600">Recuperado</span>
+                            ) : (
+                               <span className="text-xs opacity-60 font-mono">{(p.losPercentage || 0) > 0 ? "Detectado (No alarmado)" : "Normal"}</span>
+                            )}
+                          </td>
                         </tr>
                       </React.Fragment>
                     );

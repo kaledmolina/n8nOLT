@@ -606,19 +606,25 @@ async function startServer() {
     }
   });
 
-  // Local API - Get Report of Fallen Ports (Protected)
   app.get("/api/local/fallen-ports", requireAuth, async (req, res) => {
     try {
-      const thresholdRow = await db.get("SELECT value FROM settings WHERE key = 'FALLEN_PORT_THRESHOLD'");
-      const threshold = parseInt(thresholdRow?.value || '7');
-
       const { merged: onus } = await getOnusWithStatus();
       const portSummaryMap = calculatePortSummary(onus);
 
-      const fallen = Array.from(portSummaryMap.values())
-        .filter((p: any) => p.total > threshold && p.losPercentage >= 35);
+      const alerts = await db.all("SELECT * FROM port_alerts");
+      const alertMap = new Map(alerts.map((a: any) => [a.port_key, a]));
 
-      res.json(fallen);
+      const allPorts = Array.from(portSummaryMap.values()).map((p: any) => {
+        const key = `${p.olt_id}-${p.board}-${p.port}`;
+        const alertData: any = alertMap.get(key) || {};
+        return {
+          ...p,
+          alert_status: alertData.status || null,
+          consecutive_healthy: alertData.consecutive_healthy || 0
+        };
+      });
+
+      res.json(allPorts);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
